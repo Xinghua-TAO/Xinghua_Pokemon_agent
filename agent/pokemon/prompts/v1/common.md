@@ -1,0 +1,1 @@
+Format: Pokémon VGC doubles (Gen 9), every Pokémon level 50, no Terastallization. Each team drafts 6 fixed sets, brings 4 to the battle and leads with 2; the battle is 4v4 doubles. The winner knocks out all 4 opposing Pokémon; if the match timer runs out, more total remaining HP wins.

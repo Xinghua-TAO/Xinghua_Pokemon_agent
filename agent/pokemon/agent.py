@@ -26,14 +26,13 @@ from pathlib import Path
 from altruagent import DecisionContext, GameState, WithReasoning
 from examples.llm.providers import ProviderError
 
-from .analysis import annotate_options, battle_facts, fresh_from_log, speed_line, threat_lines
+from .analysis import annotate_options, battle_facts, double_target_lines, fresh_from_log, speed_line, threat_lines
 from .cards import CardBook, species_key
 from .llm import providers_from_env
 from .memory import OpponentMemory, history_lines, now_iso, parse_battle, this_game_lines
 from .options import Option, build_slot_options, combo_error, fallback_choice
-from .views import (
-    BATTLE_SYSTEM, DRAFT_SYSTEM, PREVIEW_SYSTEM, battle_view, draft_view, my_side_id, team_preview_view,
-)
+from . import promptbook
+from .views import battle_view, draft_view, my_side_id, team_preview_view
 
 # Time budgets (seconds), always inside the server's own limits:
 # draft picks have 15 s; the platform plays a random move after 50 s a turn
@@ -51,10 +50,6 @@ LOW_BANK_BUDGET = 12.0
 MIN_ATTEMPT = 2.0
 MAX_ATTEMPTS = 2
 REFLECT_TIMEOUT = 30.0
-
-REFLECT_SYSTEM = """You review a finished Pokémon VGC doubles game so we play better against the SAME opponent next time (for example the next game of a best-of-3 series).
-Write at most 3 short notes (each at most 25 words): concrete habits of the opponent that the facts show (draft priorities, leads, turn-1 plays, targeting, Protect timing, switching), and at most 1 lesson about our own play.
-State only what the facts support; do not guess. Answer with: notes (a list of strings)."""
 
 LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "decisions"
 
@@ -90,8 +85,10 @@ class DecisionLog:
 class PokemonAgent:
     def __init__(self, provider=None, *, log: DecisionLog | None = None, book: CardBook | None = None,
                  verbose: bool = True, use_clock: bool = True, memory_dir: Path | None = None,
-                 reflect: bool | None = None) -> None:
+                 reflect: bool | None = None, prompt_version: str | None = None) -> None:
         self.use_clock = use_clock  # False for offline replays of recorded states
+        self.prompt_version = prompt_version or promptbook.current_version()
+        self.prompts = promptbook.load(self.prompt_version)  # draft / preview / battle / reflect
         self.memory_dir = memory_dir  # None: memory/opponents/ in the repo
         # After each game, ask the LLM for short notes on the opponent (POKEMON_REFLECT=0 turns it off).
         self.reflect = (os.environ.get("POKEMON_REFLECT", "1") != "0") if reflect is None else reflect
@@ -190,7 +187,7 @@ class PokemonAgent:
             "our moves by turn": record.get("our_moves"),
         }
         schema = _object_schema({"notes": {"type": "array", "items": _TEXT}})
-        answer, _ = self._ask("game_notes", REFLECT_SYSTEM, json.dumps(facts, ensure_ascii=False), schema,
+        answer, _ = self._ask("game_notes", self.prompts["reflect"], json.dumps(facts, ensure_ascii=False), schema,
                               lambda a: None if isinstance(a.get("notes"), list) else "notes must be a list",
                               REFLECT_TIMEOUT, request_timeout=REFLECT_TIMEOUT)
         return [str(n)[:300] for n in (answer or {}).get("notes", [])][:4]
@@ -242,7 +239,7 @@ class PokemonAgent:
         seconds = round(time.monotonic() - started, 2)
         provider = self.draft_provider if phase == "draft" else self.provider
         self.log.write(context, {
-            "phase": phase, "model": getattr(provider, "model", None),
+            "phase": phase, "prompt_version": self.prompt_version, "model": getattr(provider, "model", None),
             "reasoning_effort": getattr(provider, "reasoning_effort", None), "seconds": seconds,
             "fallback": fallback, "view": view, "attempts": attempts, "action": action, **(extra or {}),
         })
@@ -313,7 +310,7 @@ class PokemonAgent:
         view = draft_view(obs, context.agent_id, legal_ids, self.book, self._history())
         schema = _object_schema({"analysis": _TEXT, "pick": {"type": "string", "enum": legal_ids}, "public_reason": _TEXT})
         answer, attempts = self._ask(
-            "draft_pick", DRAFT_SYSTEM, view, schema,
+            "draft_pick", self.prompts["draft"], view, schema,
             lambda a: None if a.get("pick") in legal else f"pick must be one of {legal_ids}",
             self._budget(state), provider=self.draft_provider, request_timeout=DRAFT_BUDGET,
         )
@@ -345,7 +342,7 @@ class PokemonAgent:
             return None
 
         first, retry = self._providers_for(state)
-        answer, attempts = self._ask("select_lineup", PREVIEW_SYSTEM, view, schema, validate, self._budget(state),
+        answer, attempts = self._ask("select_lineup", self.prompts["preview"], view, schema, validate, self._budget(state),
                                      provider=first, retry_provider=retry, request_timeout=PREVIEW_REQUEST)
         fallback = answer is None
         bring = roster[:4] if fallback else answer["bring"]
@@ -397,7 +394,8 @@ class PokemonAgent:
                 annotate_options(options, facts)
                 facts_lines = [speed_line(facts),
                                "OPPONENT THREATS (their best attack on each of your active Pokémon):",
-                               *threat_lines(facts)]
+                               *threat_lines(facts),
+                               *double_target_lines(options)]
             except Exception as exc:  # noqa: BLE001
                 analysis_error = f"{type(exc).__name__}: {exc}"
         try:  # what this opponent did so far, and in earlier games
@@ -423,7 +421,7 @@ class PokemonAgent:
             return combo_error(first, second)
 
         first_provider, retry = self._providers_for(state)
-        answer, attempts = self._ask("doubles_turn", BATTLE_SYSTEM, view, schema, validate, self._budget(state),
+        answer, attempts = self._ask("doubles_turn", self.prompts["battle"], view, schema, validate, self._budget(state),
                                      provider=first_provider, retry_provider=retry, request_timeout=TURN_REQUEST)
         fallback = answer is None
         if fallback:

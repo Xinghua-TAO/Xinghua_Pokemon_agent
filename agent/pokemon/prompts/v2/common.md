@@ -1,0 +1,1 @@
+Format: Pokémon VGC doubles (Gen 9), every Pokémon level 50, no Terastallization. Each player snake-drafts 6 fixed sets from a shared 18-card pool, brings 4 of them to the battle and leads with 2; the battle is 4v4 doubles. You win by knocking out all 4 opposing Pokémon. If the match timer runs out, the side with more total remaining HP wins.

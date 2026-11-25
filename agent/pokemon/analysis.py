@@ -72,8 +72,25 @@ def _short(result: Damage) -> str:
     return result.text()
 
 
+def order_note(attacker: Mon, attacker_side: Side, move_id: str, defender: Mon, defender_side: Side,
+               fld: Field) -> tuple[str, bool | None]:
+    """Does ``attacker`` using ``move_id`` act before ``defender`` (assuming the
+    defender uses a normal-priority move)? Returns (text, first?)."""
+    pri = priority(attacker, move_id, fld)
+    if pri > 0:
+        return f"priority {pri:+d}: hits before {defender.name} unless it uses priority too", True
+    if pri < 0:
+        return f"priority {pri:+d}: hits after {defender.name}", False
+    mine, theirs = speed(attacker, attacker_side, fld), speed(defender, defender_side, fld)
+    if mine == theirs:
+        return f"speed tie with {defender.name}", None
+    first = (mine > theirs) != fld.trick_room
+    return (f"moves before {defender.name}" if first else f"{defender.name} moves first"), first
+
+
 def annotate_options(options: dict[int, list[Option]], facts: BattleFacts) -> None:
-    """Add damage / KO numbers to each attack option and a score for the fallback."""
+    """Add damage / KO numbers and move order to each attack option, and a
+    score for the fallback."""
     opponents = [m for m in facts.theirs if m and m.hp > 0]
     for slot, slot_options in options.items():
         attacker = facts.mine[slot] if slot < len(facts.mine) else None
@@ -99,9 +116,11 @@ def annotate_options(options: dict[int, list[Option]], facts: BattleFacts) -> No
                 if defender:
                     result = damage(attacker, defender, move_id, facts.field, facts.their_side)
                     if result:
-                        parts.append(_short(result))
+                        order, _ = order_note(attacker, facts.my_side, move_id, defender, facts.their_side, facts.field)
+                        parts.append(f"{_short(result)}, {order}")
                         score += min(result.avg_pct, 100 * defender.hp / defender.max_hp) + 60 * result.ko_chance
                         option.extra["ko"] = {target: result.ko_chance}
+                        option.extra["dmg"] = {target: (result.lo, result.hi, defender.hp, defender.name)}
             elif target == 0 and move.get("target") in SPREAD_TARGETS:
                 victims = list(opponents)
                 hits_partner = move.get("target") == "allAdjacent" and partner is not None and partner.hp > 0
@@ -111,6 +130,9 @@ def annotate_options(options: dict[int, list[Option]], facts: BattleFacts) -> No
                     if result:
                         parts.append(f"{defender.name} {_short(result)}")
                         score += min(result.avg_pct, 100 * defender.hp / defender.max_hp) + 60 * result.ko_chance
+                        index = next((i + 1 for i, m in enumerate(facts.theirs) if m is defender), None)
+                        if index:
+                            option.extra.setdefault("dmg", {})[index] = (result.lo, result.hi, defender.hp, defender.name)
                 if hits_partner:
                     result = damage(attacker, partner, move_id, facts.field, facts.my_side, spread=n_targets > 1)
                     if result and result.effectiveness > 0:
@@ -121,21 +143,51 @@ def annotate_options(options: dict[int, list[Option]], facts: BattleFacts) -> No
                 option.extra["score"] = score
 
 
+def double_target_lines(options: dict[int, list[Option]], limit: int = 4) -> list[str]:
+    """Pairs of attacks (one per slot) that KO a target only together."""
+    found = []
+    single_ko = {target for slot_options in options.values() for o in slot_options
+                 for target, (lo, _hi, hp, _name) in (o.extra.get("dmg") or {}).items() if hp > 0 and lo >= hp}
+    for first in options.get(0, []):
+        for second in options.get(1, []):
+            for target, (lo1, hi1, hp, name) in (first.extra.get("dmg") or {}).items():
+                other = (second.extra.get("dmg") or {}).get(target)
+                if not other or hp <= 0 or target in single_ko:
+                    continue  # some single attack already KOs it
+                lo2, hi2 = other[0], other[1]
+                if lo1 >= hp or lo2 >= hp:
+                    continue  # one alone already KOs: no need to double up
+                if lo1 + lo2 >= hp:
+                    found.append((0, f"{first.id} + {second.id} on {name} (sure KO together)"))
+                elif hi1 + hi2 >= hp:
+                    found.append((1, f"{first.id} + {second.id} on {name} (KO only with high rolls)"))
+    found.sort()
+    if not found:
+        return []
+    return ["DOUBLE-TARGET KOs (both slots on one target; neither KOs it alone): "
+            + "; ".join(text for _, text in found[:limit])]
+
+
 def threat_lines(facts: BattleFacts) -> list[str]:
-    """The opponent's best attack against each of our active Pokémon."""
+    """The opponent's best attack against each of our active Pokémon, and
+    whether it lands before our Pokémon can act."""
     lines = []
     for index, opp in enumerate(facts.theirs):
         if not opp or opp.hp <= 0:
             continue
         pieces = []
-        for mine in facts.mine:
+        for slot, mine in enumerate(facts.mine):
             if not mine or mine.hp <= 0:
                 continue
             best = best_attack(opp, mine, facts.field, facts.my_side)
             if best:
                 move_id, result = best
                 name = (dex.move(move_id) or {}).get("name", move_id)
-                pieces.append(f"{name} -> YOUR {mine.name} {result.text()}")
+                _, opp_first = order_note(opp, facts.their_side, move_id, mine, facts.my_side, facts.field)
+                when = "hits before YOUR " + mine.name + " moves" if opp_first else \
+                    ("speed tie" if opp_first is None else "after YOUR " + mine.name + " moves")
+                danger = "DANGER: " if opp_first and result.ko_chance >= 0.5 else ""
+                pieces.append(f"{danger}{name} -> YOUR {mine.name} {result.text()}, {when}")
         extras = []
         if "fakeout" in opp.moves and facts.their_moved[index] is False:
             extras.append("can still Fake Out")

@@ -267,3 +267,26 @@ def test_router_sends_pokemon_to_our_agent_and_others_to_placeholder(monkeypatch
     move = pokemon_router.choose_action(_doubles_state(), CTX)  # no key: code fallback, still valid
     assert move["type"] == "doubles_turn"
     assert isinstance(pokemon_router._agent, PokemonAgent)
+
+
+# ---------------------------------------------------------------- prompts
+
+def test_prompt_versions_load_and_are_logged(monkeypatch):
+    import pytest
+
+    from agent.pokemon import promptbook
+
+    for version in ("v1", "v2"):
+        prompts = promptbook.load(version)
+        assert set(prompts) == {"draft", "preview", "battle", "reflect"}
+        assert all(p and "{COMMON}" not in p for p in prompts.values())
+        assert "VGC doubles" in prompts["battle"]
+    assert "Never choose an option marked WARNING" in promptbook.load("v2")["battle"]
+    with pytest.raises(ValueError):
+        promptbook.load("v999")
+
+    monkeypatch.setenv("POKEMON_PROMPT_VERSION", "v1")
+    provider = FakeProvider([{"analysis": "", "slot_0": "a1", "slot_1": "b1", "public_reason": ""}])
+    agent = PokemonAgent(provider, log=NullLog(), book=CardBook(), verbose=False)
+    agent.choose_action(_doubles_state(), CTX)
+    assert agent.log.last["prompt_version"] == "v1"

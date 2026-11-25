@@ -319,6 +319,26 @@
    "Thunder Wave"
   ]
  },
+ "vgc-gyarados": {
+  "card_id": "vgc-gyarados",
+  "species": "Gyarados",
+  "item": "Sitrus Berry",
+  "ability": "Intimidate",
+  "nature": "Adamant",
+  "level": 50,
+  "evs": {
+   "hp": 252,
+   "atk": 252,
+   "spe": 4
+  },
+  "ivs": {},
+  "moves": [
+   "Waterfall",
+   "Earthquake",
+   "Taunt",
+   "Protect"
+  ]
+ },
  "vgc-hatterene": {
   "card_id": "vgc-hatterene",
   "species": "Hatterene",
