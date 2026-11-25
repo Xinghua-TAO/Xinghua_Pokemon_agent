@@ -68,6 +68,11 @@ LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "decisions"
 # Preview. Each seat appends its result to AB_DIR/teambuild.jsonl
 # (tools/ab_report.py sums them up).
 AB_ENV = "POKEMON_AB_TEAMBUILD"
+# Code-ranked shortlists are OFF by default: in the A/B test (2026-11-25) the
+# ranked seat won 3 of 11 games; its 1-on-1 duel score favours bulky, slow
+# teams, and team Speed predicted the winner better (docs/team_building.md).
+# POKEMON_TEAMBUILD=1 turns them back on.
+TEAMBUILD_ENV = "POKEMON_TEAMBUILD"
 AB_DIR = Path(__file__).resolve().parents[2] / "logs" / "ab"
 
 
@@ -113,7 +118,8 @@ class DecisionLog:
 class PokemonAgent:
     def __init__(self, provider=None, *, log: DecisionLog | None = None, book: CardBook | None = None,
                  verbose: bool = True, use_clock: bool = True, memory_dir: Path | None = None,
-                 reflect: bool | None = None, prompt_version: str | None = None, ab: bool | None = None) -> None:
+                 reflect: bool | None = None, prompt_version: str | None = None, ab: bool | None = None,
+                 teambuild: bool | None = None) -> None:
         self.use_clock = use_clock  # False for offline replays of recorded states
         self.prompt_version = prompt_version or promptbook.current_version()
         self.prompts = promptbook.load(self.prompt_version)  # draft / preview / battle / reflect
@@ -135,7 +141,8 @@ class PokemonAgent:
         self.opponent_preview: list[dict] = []
         self.ab = os.environ.get(AB_ENV, "0") not in ("", "0") if ab is None else ab
         self.arm: str | None = None  # A/B arm of this game, when the A/B test is on
-        self.use_ranking = True  # show the CODE-RANKED shortlists (off in the A/B "plain" arm)
+        # Show the CODE-RANKED shortlists? Off by default; the A/B test overrides it per seat.
+        self.use_ranking = os.environ.get(TEAMBUILD_ENV, "0") not in ("", "0") if teambuild is None else teambuild
         # Fake Out works only on a Pokémon's first turn on the field.
         self._last_active: list[str | None] = [None, None]
         self._has_acted: list[bool] = [False, False]

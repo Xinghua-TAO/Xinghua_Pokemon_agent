@@ -117,7 +117,7 @@ CTX = DecisionContext(session_id="s", tournament_id=None, game_type="pokemon_vgc
 
 def _agent(provider):
     agent = PokemonAgent(provider, log=NullLog(), book=CardBook(), verbose=False, use_clock=False, reflect=False,
-                         ab=False)
+                         ab=False, teambuild=True)
     agent.past = []
     return agent
 
@@ -283,3 +283,16 @@ def test_ab_report_pairs_seats_and_tests_against_half():
     assert binomial_p(5, 10) == 1.0 and binomial_p(10, 10) == pytest.approx(2 / 1024)
     lo, hi = wilson(30, 50)
     assert lo == pytest.approx(0.461, abs=1e-3) and hi == pytest.approx(0.724, abs=1e-3)
+
+
+def test_ranking_is_off_by_default(monkeypatch):
+    monkeypatch.delenv("POKEMON_TEAMBUILD", raising=False)
+    monkeypatch.delenv("POKEMON_AB_TEAMBUILD", raising=False)
+    provider = FailingProvider()
+    agent = PokemonAgent(provider, log=NullLog(), book=CardBook(), verbose=False, use_clock=False, reflect=False)
+    agent.book.remember(list(CATALOG.values()))
+    action = agent.choose_action(_draft_state(), CTX)
+    assert "CODE-RANKED" not in provider.views[0] and agent.log.last["code_ranking"] == []
+    assert action.action_id == _draft_state().legal_actions[0].action_id
+    monkeypatch.setenv("POKEMON_TEAMBUILD", "1")
+    assert PokemonAgent(provider, log=NullLog(), book=CardBook(), verbose=False).use_ranking

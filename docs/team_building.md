@@ -1,5 +1,8 @@
 # Code-ranked team building
 
+**Status: off by default since 2026-11-25** (`POKEMON_TEAMBUILD=1` turns it
+on). It lost its A/B test; see "A/B results" at the end.
+
 Before this change the LLM chose draft picks and Team Preview lineups from
 card text and damage tables alone. That is a combinatorial job: 15 ways to
 bring 4 of 6, times 6 lead pairs, or up to 17 legal draft cards. Draft picks
@@ -89,3 +92,46 @@ large effect or a regression.
 
 The switch is off unless `POKEMON_AB_TEAMBUILD=1` is set; tournament games
 always use the ranking.
+
+## A/B results (2026-11-25) and decision
+
+There were 11 self-play games, 10 of them played at once. One seat was
+ranked, the other plain; battles used identical code.
+
+- **The ranked seat won 3 of 11** (27%). The 95% CI is 10–57% and the exact
+  binomial p = 0.23 against 50%. That is not significant, but it points the
+  wrong way.
+- **The model followed the shortlist closely.** In the draft it took the
+  code's #1 card 38 of 60 times. At Team Preview it brought a code-ranked
+  lineup 7 of 10 times.
+- **The ranking favoured bulky Pokémon.** Iron Hands, which wins many
+  one-on-one duels, was on 7 of 10 ranked teams. The plain seat drafted fast
+  attackers (Chien-Pao, Chi-Yu, Flutter Mane, Tornadus).
+- **The code's own score was a poor predictor of the winner** (11 games):
+
+  | Predictor | Picked the winner |
+  |---|---|
+  | Code team score (ranked team favoured in 10 of 11) | 3 of 11 |
+  | Higher mean team Speed | 9 of 11 |
+  | Higher mean best hit (% HP) | 4 of 11 |
+
+  The one slow ranked team that won was a coherent Trick Room team.
+
+**Interpretation.** The duel counts hits-to-KO and uses Speed only as a
+tiebreaker. Doubles games here lasted 5–9 turns, and two attackers can focus
+one target, so moving first is worth more than surviving one more hit. The
+Speed finding is exploratory: the predictors were chosen after seeing these
+games, and 9 of 11 gives p ≈ 0.07. A redesigned score (Speed-weighted, with
+Trick Room coherence) would need fresh games to validate.
+
+**Decision.** The ranking is off by default, so the agent drafts on its own
+judgment, as the plain seat did (8 of 11 wins). The code stays in the repo
+for a possible redesign.
+
+Two seat-independent bugs also surfaced in these games and were fixed:
+
+- a mislabelled Tailwind timer (see `docs/prompt_eval.md`);
+- Fake Out offered after a flinched first turn.
+
+Both Fake Out failures hit ranked seats, because Iron Hands was on those
+teams. That cost the ranked arm a little, but not 8 of 11.
