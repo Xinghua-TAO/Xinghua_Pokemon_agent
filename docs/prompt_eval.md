@@ -52,5 +52,21 @@ Numbers in parentheses are a second run; with 3 runs per cell, differences of
   reliable speed control before the opponent's double pick"). v1 called
   Garchomp "speed control" and stated no overall plan.
 
+## Reasoning effort for battle turns (gpt-5.5)
+
+In a live self-play game with gpt-5.5 at its default reasoning effort, 4 of 25
+battle decisions (16%) hit our 30 s request timeout. The fast retry (effort
+"none") answered them in ~3.5 s, but each timeout wasted ~30 s of the 420 s
+battle bank. On the same 7 scenarios:
+
+| gpt-5.5 battle effort | Score | Time per decision |
+|---|---|---|
+| default | 21/21 | 3.8-33.4 s (median ~15 s) |
+| low | 21/21 | 2.5-13.9 s (median ~3 s) |
+
+We use `POKEMON_REASONING_EFFORT=low` for battles and team preview, and
+`none` for draft picks. The eval is saturated at gpt-5.5, so a subtle loss
+from lower effort can't be excluded; the timeout cost is measured.
+
 Reproduce: `python -m tools.eval_prompts --versions v1,v2 --runs 3`
-(set `POKEMON_MODEL` to compare models).
+(set `POKEMON_MODEL` / `POKEMON_REASONING_EFFORT` to compare models and effort).

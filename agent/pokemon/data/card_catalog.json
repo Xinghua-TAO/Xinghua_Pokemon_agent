@@ -641,6 +641,26 @@
    "Protect"
   ]
  },
+ "vgc-sneasler": {
+  "card_id": "vgc-sneasler",
+  "species": "Sneasler",
+  "item": "Aguav Berry",
+  "ability": "Unburden",
+  "nature": "Jolly",
+  "level": 50,
+  "evs": {
+   "hp": 4,
+   "atk": 252,
+   "spe": 252
+  },
+  "ivs": {},
+  "moves": [
+   "Fake Out",
+   "Close Combat",
+   "Dire Claw",
+   "Protect"
+  ]
+ },
  "vgc-talonflame": {
   "card_id": "vgc-talonflame",
   "species": "Talonflame",
@@ -698,6 +718,26 @@
    "Ruination",
    "Spikes",
    "Earthquake",
+   "Protect"
+  ]
+ },
+ "vgc-torkoal": {
+  "card_id": "vgc-torkoal",
+  "species": "Torkoal",
+  "item": "Charcoal",
+  "ability": "Drought",
+  "nature": "Quiet",
+  "level": 50,
+  "evs": {
+   "hp": 252,
+   "spa": 252,
+   "spd": 4
+  },
+  "ivs": {},
+  "moves": [
+   "Eruption",
+   "Heat Wave",
+   "Yawn",
    "Protect"
   ]
  },
