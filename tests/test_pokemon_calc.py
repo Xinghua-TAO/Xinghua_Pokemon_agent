@@ -145,3 +145,38 @@ def test_protect_streak_from_log():
     assert read_log(failed).protect_streak[("p2", "Cresselia")] == 0
     attacked = log + ["|move|p2b: Cresselia|Moonblast|p1a: Arcanine"]
     assert read_log(attacked).protect_streak[("p2", "Cresselia")] == 0
+
+
+# ---------------------------------------------------------------- field effects
+
+def test_field_effects_show_turns_left_not_the_start_turn():
+    from agent.pokemon.analysis import effect_text, field_lines
+
+    # The server sends the turn an effect was set; Tailwind set on turn 1 lasts through turn 4.
+    assert effect_text("TAILWIND", 1, 2) == "Tailwind (set turn 1; last turn 4: 3 turn(s) left incl. this one)"
+    assert effect_text("TAILWIND", 1, 4).endswith("1 turn(s) left incl. this one)")
+    assert "last turn 7" in effect_text("LIGHT_SCREEN", 3, 4)
+    assert "Light Clay" in effect_text("LIGHT_SCREEN", 3, 4, {"lightclay"})
+    assert "last turn 5:" in effect_text("GRASSY_TERRAIN", 0, 1)  # from an ability at the start
+    assert "last turn about 6" in effect_text("SUNNYDAY", 2, 3)
+    assert effect_text("SPIKES", 2, 5) == "Spikes x2"
+    obs = {"turn": 2, "side_conditions": {"TAILWIND": 1}, "opponent_side_conditions": {"REFLECT": 2},
+           "fields": {"TRICK_ROOM": 2}, "weather": {}}
+    lines = field_lines(obs)
+    assert lines[0].startswith("FIELD: Trick Room (set turn 2; last turn 6")
+    assert lines[1].startswith("YOUR SIDE: Tailwind") and lines[2].startswith("THEIR SIDE: Reflect")
+
+
+def test_moves_that_would_fail_are_flagged():
+    from types import SimpleNamespace
+
+    from agent.pokemon.analysis import failing_reason
+
+    facts = SimpleNamespace(my_side=Side(tailwind=True, reflect=True), field=Field(weather="sun", terrain="grassy"))
+    assert "already active" in failing_reason("tailwind", facts)
+    assert "Reflect" in failing_reason("reflect", facts)
+    assert failing_reason("lightscreen", facts) is None
+    assert "snow" in failing_reason("auroraveil", facts)
+    assert failing_reason("sunnyday", facts) and failing_reason("raindance", facts) is None
+    assert failing_reason("grassyterrain", facts) and failing_reason("psychicterrain", facts) is None
+    assert failing_reason("tailwind", SimpleNamespace(my_side=Side(), field=Field())) is None

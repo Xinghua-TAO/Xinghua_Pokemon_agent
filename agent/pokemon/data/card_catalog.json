@@ -439,6 +439,26 @@
    "Drain Punch"
   ]
  },
+ "vgc-iron-treads": {
+  "card_id": "vgc-iron-treads",
+  "species": "Iron Treads",
+  "item": "Booster Energy",
+  "ability": "Quark Drive",
+  "nature": "Jolly",
+  "level": 50,
+  "evs": {
+   "hp": 4,
+   "atk": 252,
+   "spe": 252
+  },
+  "ivs": {},
+  "moves": [
+   "Earthquake",
+   "Iron Head",
+   "High Horsepower",
+   "Protect"
+  ]
+ },
  "vgc-iron-valiant": {
   "card_id": "vgc-iron-valiant",
   "species": "Iron Valiant",
@@ -798,6 +818,26 @@
    "Liquidation",
    "Haze",
    "Toxic",
+   "Protect"
+  ]
+ },
+ "vgc-tyranitar": {
+  "card_id": "vgc-tyranitar",
+  "species": "Tyranitar",
+  "item": "Chople Berry",
+  "ability": "Sand Stream",
+  "nature": "Careful",
+  "level": 50,
+  "evs": {
+   "hp": 252,
+   "atk": 4,
+   "spd": 252
+  },
+  "ivs": {},
+  "moves": [
+   "Rock Slide",
+   "Knock Off",
+   "Low Kick",
    "Protect"
   ]
  },

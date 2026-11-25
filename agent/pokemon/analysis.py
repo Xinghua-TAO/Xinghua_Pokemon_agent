@@ -88,6 +88,95 @@ def order_note(attacker: Mon, attacker_side: Side, move_id: str, defender: Mon, 
     return (f"moves before {defender.name}" if first else f"{defender.name} moves first"), first
 
 
+# ------------------------------------------------------------------ field effects
+# The server reports active effects as {KEY: turn it was set} (layers for
+# Spikes). Durations measured in our recorded battles: Tailwind set on turn T
+# is active through T+3; screens and Trick Room through T+4; weather/terrain
+# from an ability at the start (turn 0) through turn 5.
+
+EFFECT_NAMES = {
+    "TAILWIND": "Tailwind", "REFLECT": "Reflect", "LIGHT_SCREEN": "Light Screen", "AURORA_VEIL": "Aurora Veil",
+    "SAFEGUARD": "Safeguard", "MIST": "Mist", "SPIKES": "Spikes", "TOXIC_SPIKES": "Toxic Spikes",
+    "STEALTH_ROCK": "Stealth Rock", "STICKY_WEB": "Sticky Web", "TRICK_ROOM": "Trick Room", "GRAVITY": "Gravity",
+    "MAGIC_ROOM": "Magic Room", "WONDER_ROOM": "Wonder Room",
+    "GRASSY_TERRAIN": "Grassy Terrain", "ELECTRIC_TERRAIN": "Electric Terrain", "PSYCHIC_TERRAIN": "Psychic Terrain",
+    "MISTY_TERRAIN": "Misty Terrain", "SUNNYDAY": "Sun", "RAINDANCE": "Rain", "SANDSTORM": "Sandstorm",
+    "SNOW": "Snow", "SNOWSCAPE": "Snow", "HAIL": "Snow", "DESOLATELAND": "Harsh sun", "PRIMORDIALSEA": "Heavy rain",
+    "DELTASTREAM": "Strong winds",
+}
+_EXACT_DURATION = {"TAILWIND": 4, "REFLECT": 5, "LIGHT_SCREEN": 5, "AURORA_VEIL": 5, "SAFEGUARD": 5, "MIST": 5,
+                   "TRICK_ROOM": 5, "GRAVITY": 5, "MAGIC_ROOM": 5, "WONDER_ROOM": 5}  # only ever set by a move
+_WEATHER_TERRAIN = {"GRASSY_TERRAIN", "ELECTRIC_TERRAIN", "PSYCHIC_TERRAIN", "MISTY_TERRAIN", "SUNNYDAY",
+                    "RAINDANCE", "SANDSTORM", "SNOW", "SNOWSCAPE", "HAIL"}  # 5 turns; set by a move or an ability
+_EXTENDER = {"REFLECT": "lightclay", "LIGHT_SCREEN": "lightclay", "AURORA_VEIL": "lightclay",
+             "GRASSY_TERRAIN": "terrainextender", "ELECTRIC_TERRAIN": "terrainextender",
+             "PSYCHIC_TERRAIN": "terrainextender", "MISTY_TERRAIN": "terrainextender", "SUNNYDAY": "heatrock",
+             "RAINDANCE": "damprock", "SANDSTORM": "smoothrock", "SNOW": "icyrock", "SNOWSCAPE": "icyrock",
+             "HAIL": "icyrock"}
+_ITEM_NAMES = {"lightclay": "Light Clay", "terrainextender": "Terrain Extender", "heatrock": "Heat Rock",
+               "damprock": "Damp Rock", "smoothrock": "Smooth Rock", "icyrock": "Icy Rock"}
+_LAYERS = {"SPIKES", "TOXIC_SPIKES"}
+
+
+def effect_text(key: str, value, turn: int, extender_items: set[str] = frozenset()) -> str:
+    """One active effect, e.g. "Tailwind (set turn 1; last turn 4: 3 turns left incl. this one)"."""
+    key = str(key).upper()
+    name = EFFECT_NAMES.get(key, key.replace("_", " ").title())
+    if key in _LAYERS:
+        return f"{name} x{value}" if isinstance(value, int) else name
+    if not isinstance(value, int) or (key not in _EXACT_DURATION and key not in _WEATHER_TERRAIN):
+        return name
+    if key in _EXACT_DURATION:
+        last, approx = value + _EXACT_DURATION[key] - 1, ""
+    else:  # an ability at the start lasts through turn 5; set later, through T+4 or T+5
+        last, approx = (5, "") if value == 0 else (value + 4, "about ")
+    left = last - turn + 1
+    when = f"{left} turn(s) left incl. this one" if left > 0 else "ends this turn"
+    text = f"{name} (set turn {value}; last turn {approx}{last}: {when})"
+    item = _EXTENDER.get(key)
+    if item and item in extender_items:
+        text += f" (3 turns longer if set by the {_ITEM_NAMES[item]} holder)"
+    return text
+
+
+def field_lines(obs: dict, my_items: set[str] = frozenset(), their_items: set[str] = frozenset()) -> list[str]:
+    turn = obs.get("turn") if isinstance(obs.get("turn"), int) else 0
+    both = set(my_items) | set(their_items)
+    shared = [effect_text(k, v, turn, both) for k, v in {**(obs.get("weather") or {}), **(obs.get("fields") or {})}.items()]
+    mine = [effect_text(k, v, turn, set(my_items)) for k, v in (obs.get("side_conditions") or {}).items()]
+    theirs = [effect_text(k, v, turn, set(their_items)) for k, v in (obs.get("opponent_side_conditions") or {}).items()]
+    lines = []
+    if shared:
+        lines.append("FIELD: " + "; ".join(shared))
+    if mine:
+        lines.append("YOUR SIDE: " + "; ".join(mine))
+    if theirs:
+        lines.append("THEIR SIDE: " + "; ".join(theirs))
+    return lines
+
+
+_SCREENS = {"reflect": ("reflect", "Reflect"), "lightscreen": ("light_screen", "Light Screen"),
+            "auroraveil": ("aurora_veil", "Aurora Veil")}
+_WEATHER_MOVES = {"sunnyday": "sun", "raindance": "rain", "sandstorm": "sand", "snowscape": "snow", "hail": "snow"}
+_TERRAIN_MOVES = {"grassyterrain": "grassy", "electricterrain": "electric", "psychicterrain": "psychic",
+                  "mistyterrain": "misty"}
+
+
+def failing_reason(move_id: str, facts: BattleFacts) -> str | None:
+    """Why this status move would do nothing right now, or None."""
+    if move_id == "tailwind" and facts.my_side.tailwind:
+        return "Tailwind is already active on your side (it cannot be refreshed)"
+    if move_id in _SCREENS and getattr(facts.my_side, _SCREENS[move_id][0]):
+        return f"{_SCREENS[move_id][1]} is already up on your side"
+    if move_id == "auroraveil" and facts.field.weather != "snow":
+        return "Aurora Veil only works in snow"
+    if _WEATHER_MOVES.get(move_id) and facts.field.weather == _WEATHER_MOVES[move_id]:
+        return "that weather is already active"
+    if _TERRAIN_MOVES.get(move_id) and facts.field.terrain == _TERRAIN_MOVES[move_id]:
+        return "that terrain is already active"
+    return None
+
+
 def annotate_options(options: dict[int, list[Option]], facts: BattleFacts) -> None:
     """Add damage / KO numbers and move order to each attack option, and a
     score for the fallback."""
@@ -99,6 +188,13 @@ def annotate_options(options: dict[int, list[Option]], facts: BattleFacts) -> No
             continue
         streak = facts.my_protect_streak[slot] if slot < len(facts.my_protect_streak) else 0
         for option in slot_options:
+            if option.kind == "move" and (reason := failing_reason(option.payload["move_id"], facts)):
+                option.text += f" => WARNING: fails, {reason}"
+                option.extra["score"] = -10.0
+                continue
+            if option.kind == "move" and option.payload["move_id"] == "trickroom" and facts.field.trick_room:
+                option.text += (" => NOTE: Trick Room is already active; using it again ENDS it "
+                                "(good only if Trick Room helps the opponent)")
             if option.kind == "move" and option.payload["move_id"] in PROTECT_MOVES and streak > 0:
                 chance = round(100 / 3 ** streak)
                 option.text += (f" => WARNING: used successfully {streak} turn(s) in a row, "

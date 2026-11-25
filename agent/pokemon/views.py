@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from .analysis import draft_card_summary, preview_lines
+from .analysis import draft_card_summary, field_lines, preview_lines
 from .cards import CardBook, format_card, species_key
 from .options import Option
 
@@ -165,16 +165,10 @@ def battle_view(
     my_side = my_side_id(obs)
     switchable = {o.payload["species"] for slot_options in options.values() for o in slot_options if o.kind == "switch"}
     lines = [f"Turn {obs.get('turn')}."]
-    weather = obs.get("weather") or {}
-    fields = obs.get("fields") or {}
-    if weather:
-        lines.append(f"Weather: {weather}")
-    if fields:
-        lines.append(f"Field: {fields}")
-    if obs.get("side_conditions"):
-        lines.append(f"Your side conditions (turns left): {obs['side_conditions']}")
-    if obs.get("opponent_side_conditions"):
-        lines.append(f"Opponent side conditions (turns left): {obs['opponent_side_conditions']}")
+    my_items = {species_key(e.get("item")) for e in (obs.get("team") or {}).values() if isinstance(e, dict)}
+    their_items = {species_key((book.by_species(e.get("species")) or {}).get("item"))
+                   for e in opponent_preview or [] if isinstance(e, dict)}
+    lines += field_lines(obs, my_items - {""}, their_items - {""})
 
     actives = obs.get("active_pokemon") or [None, None]
     lines.append("YOUR ACTIVE POKÉMON:")

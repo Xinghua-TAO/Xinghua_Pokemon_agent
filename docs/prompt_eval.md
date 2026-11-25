@@ -70,3 +70,33 @@ from lower effort can't be excluded; the timeout cost is measured.
 
 Reproduce: `python -m tools.eval_prompts --versions v1,v2 --runs 3`
 (set `POKEMON_MODEL` / `POKEMON_REASONING_EFFORT` to compare models and effort).
+
+## A view bug found in a live game: "refreshing" Tailwind
+
+In a live self-play game (2026-11-25), Tornadus used Tailwind on turn 2
+while our Tailwind was already up. Using Tailwind again fails, and Iron
+Bundle then knocked Tornadus out before it did anything. The model's
+reasoning: "refreshing Tailwind before Tornadus goes down".
+
+The cause was our view, not the model. The server reports active effects as
+`{"TAILWIND": 1}`, which means set on turn 1. Our view printed this as
+"Your side conditions (turns left): {'TAILWIND': 1}", so the model read
+"1 turn left".
+
+Fix (code, not prompt):
+
+- The view now shows each effect with when it was set, its last turn, and
+  the turns left. Durations were measured in our recorded battles: Tailwind
+  set on turn T lasts through T+3; screens and Trick Room through T+4;
+  weather and terrain set by an ability at the start last through turn 5.
+- Moves that would fail right now (Tailwind or a screen already up, the same
+  weather or terrain already active, Aurora Veil without snow) are marked
+  WARNING, which the v2 prompt forbids and the fallback avoids.
+- Re-using Trick Room gets a NOTE that it ends Trick Room.
+
+The state is now eval scenario `tailwind_already_up`. Old view: 2/3
+decisions avoided the failing Tailwind, plus the live failure. New view: 3/3
+(gpt-5.5, v2).
+
+Lesson: check the meaning of every number shown to the model. A
+mislabeled fact is worse than a missing one.

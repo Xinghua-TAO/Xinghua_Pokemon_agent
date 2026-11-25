@@ -101,6 +101,14 @@ def no_repeat_protect(slot: str):
     return check
 
 
+def no_tailwind(slot: str):
+    def check(action):  # Tailwind is already up: using it again fails and wastes the turn
+        if (action.get(slot) or {}).get("move_id") == "tailwind":
+            return False, f"{slot} used Tailwind while it was already active (fails)"
+        return True, "no wasted Tailwind"
+    return check
+
+
 SCENARIOS = [
     # name, session id prefix, seat, decision index in the recorded file, check
     ("thundurus_8pct", "59be36f2", 0, 9, check_thundurus),
@@ -110,6 +118,9 @@ SCENARIOS = [
     ("protect_streak_cresselia", "426dadc1", 1, 18, no_repeat_protect("slot_1")),
     ("protect_streak_cresselia_fm", "17003b77", 0, 9, no_repeat_protect("slot_0")),
     ("protect_streak_thundurus", "6e347545", 0, 8, no_repeat_protect("slot_0")),
+    # Live A/B game, 2026-11-25: the view mislabeled Tailwind's start turn as "turns left",
+    # so the model "refreshed" Tailwind (it fails) and Tornadus fainted without acting.
+    ("tailwind_already_up", "cf324219", 1, 8, no_tailwind("slot_1")),
 ]
 
 
