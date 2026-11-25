@@ -19,6 +19,26 @@
    "Sludge Bomb"
   ]
  },
+ "vgc-arcanine": {
+  "card_id": "vgc-arcanine",
+  "species": "Arcanine",
+  "item": "Safety Goggles",
+  "ability": "Intimidate",
+  "nature": "Adamant",
+  "level": 50,
+  "evs": {
+   "hp": 252,
+   "atk": 252,
+   "spe": 4
+  },
+  "ivs": {},
+  "moves": [
+   "Flare Blitz",
+   "Extreme Speed",
+   "Snarl",
+   "Protect"
+  ]
+ },
  "vgc-archaludon": {
   "card_id": "vgc-archaludon",
   "species": "Archaludon",
@@ -77,6 +97,26 @@
    "Glaive Rush",
    "Ice Shard",
    "Protect"
+  ]
+ },
+ "vgc-chi-yu": {
+  "card_id": "vgc-chi-yu",
+  "species": "Chi-Yu",
+  "item": "Choice Specs",
+  "ability": "Beads of Ruin",
+  "nature": "Timid",
+  "level": 50,
+  "evs": {
+   "hp": 4,
+   "spa": 252,
+   "spe": 252
+  },
+  "ivs": {},
+  "moves": [
+   "Heat Wave",
+   "Dark Pulse",
+   "Overheat",
+   "Snarl"
   ]
  },
  "vgc-chien-pao": {
@@ -459,6 +499,26 @@
    "Protect"
   ]
  },
+ "vgc-porygon2": {
+  "card_id": "vgc-porygon2",
+  "species": "Porygon2",
+  "item": "Eviolite",
+  "ability": "Download",
+  "nature": "Quiet",
+  "level": 50,
+  "evs": {
+   "hp": 252,
+   "spa": 252,
+   "spd": 4
+  },
+  "ivs": {},
+  "moves": [
+   "Trick Room",
+   "Tri Attack",
+   "Ice Beam",
+   "Recover"
+  ]
+ },
  "vgc-rillaboom": {
   "card_id": "vgc-rillaboom",
   "species": "Rillaboom",
@@ -499,6 +559,26 @@
    "Fake Out",
    "Will-O-Wisp",
    "Taunt"
+  ]
+ },
+ "vgc-scream-tail": {
+  "card_id": "vgc-scream-tail",
+  "species": "Scream Tail",
+  "item": "Covert Cloak",
+  "ability": "Protosynthesis",
+  "nature": "Bold",
+  "level": 50,
+  "evs": {
+   "hp": 252,
+   "def": 252,
+   "spd": 4
+  },
+  "ivs": {},
+  "moves": [
+   "Dazzling Gleam",
+   "Encore",
+   "Wish",
+   "Protect"
   ]
  },
  "vgc-talonflame": {
@@ -578,6 +658,26 @@
    "Bleakwind Storm",
    "Taunt",
    "Tailwind",
+   "Protect"
+  ]
+ },
+ "vgc-toxapex": {
+  "card_id": "vgc-toxapex",
+  "species": "Toxapex",
+  "item": "Black Sludge",
+  "ability": "Regenerator",
+  "nature": "Careful",
+  "level": 50,
+  "evs": {
+   "hp": 252,
+   "def": 4,
+   "spd": 252
+  },
+  "ivs": {},
+  "moves": [
+   "Liquidation",
+   "Haze",
+   "Toxic",
    "Protect"
   ]
  },

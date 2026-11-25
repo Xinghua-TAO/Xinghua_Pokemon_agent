@@ -15,21 +15,20 @@ Every decision follows the same loop:
 from __future__ import annotations
 
 import json
-import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from altruagent import DecisionContext, GameState, WithReasoning
-from examples.llm.providers import DEFAULT_OPENAI_BASE_URL, OpenAIProvider, ProviderError
+from examples.llm.providers import ProviderError
 
+from .analysis import annotate_options, battle_facts, fresh_from_log, speed_line, threat_lines
 from .cards import CardBook, species_key
+from .llm import providers_from_env
 from .options import Option, build_slot_options, combo_error, fallback_choice
 from .views import (
-    BATTLE_SYSTEM, DRAFT_SYSTEM, PREVIEW_SYSTEM, battle_view, draft_view, team_preview_view,
+    BATTLE_SYSTEM, DRAFT_SYSTEM, PREVIEW_SYSTEM, battle_view, draft_view, my_side_id, team_preview_view,
 )
-
-DEFAULT_MODEL = "gpt-4o-mini"
 
 # Time budgets (seconds), always inside the server's own limits:
 # draft picks have 15 s; the platform plays a random move after 50 s a turn
@@ -43,14 +42,6 @@ MIN_ATTEMPT = 2.0
 MAX_ATTEMPTS = 2
 
 LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "decisions"
-
-
-def provider_from_env() -> OpenAIProvider | None:
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    model = os.environ.get("POKEMON_MODEL") or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
-    return OpenAIProvider(api_key, model, base_url=os.environ.get("OPENAI_BASE_URL") or DEFAULT_OPENAI_BASE_URL)
 
 
 def _object_schema(properties: dict) -> dict:
@@ -85,8 +76,12 @@ class PokemonAgent:
     def __init__(self, provider=None, *, log: DecisionLog | None = None, book: CardBook | None = None,
                  verbose: bool = True, use_clock: bool = True) -> None:
         self.use_clock = use_clock  # False for offline replays of recorded states
-        # provider=None: from the environment; provider=False: no LLM (fallback only).
-        self.provider = provider_from_env() if provider is None else (provider or None)
+        # provider=None: from the environment (battle + draft models, see llm.py);
+        # provider=False: no LLM (fallback only); a provider object: used for every phase.
+        if provider is None:
+            self.provider, self.draft_provider = providers_from_env()
+        else:
+            self.provider = self.draft_provider = provider or None
         self.book = book or CardBook()
         self.log = log or DecisionLog()
         self.verbose = verbose
@@ -108,11 +103,13 @@ class PokemonAgent:
 
     # ------------------------------------------------------------ LLM helper
 
-    def _ask(self, name: str, system: str, view: str, schema: dict, validate, budget: float) -> tuple[dict | None, list]:
+    def _ask(self, name: str, system: str, view: str, schema: dict, validate, budget: float,
+             provider=None) -> tuple[dict | None, list]:
         """Ask the model until ``validate(answer)`` returns None (no error).
         Returns (answer or None, attempt records)."""
+        provider = provider or self.provider
         attempts: list[dict] = []
-        if self.provider is None:
+        if provider is None:
             attempts.append({"error": "no OPENAI_API_KEY; using fallback"})
             return None, attempts
         deadline = time.monotonic() + budget
@@ -124,7 +121,7 @@ class PokemonAgent:
                 break
             started = time.monotonic()
             try:
-                answer = self.provider.complete_structured(messages, name, schema, timeout=min(REQUEST_TIMEOUT, left))
+                answer = provider.complete_structured(messages, name, schema, timeout=min(REQUEST_TIMEOUT, left))
             except ProviderError as exc:
                 attempts.append({"error": str(exc), "seconds": round(time.monotonic() - started, 2)})
                 continue
@@ -141,8 +138,10 @@ class PokemonAgent:
     def _record(self, context: DecisionContext, phase: str, started: float, view: str, attempts: list,
                 action, fallback: bool, extra: dict | None = None) -> None:
         seconds = round(time.monotonic() - started, 2)
+        provider = self.draft_provider if phase == "draft" else self.provider
         self.log.write(context, {
-            "phase": phase, "model": getattr(self.provider, "model", None), "seconds": seconds,
+            "phase": phase, "model": getattr(provider, "model", None),
+            "reasoning_effort": getattr(provider, "reasoning_effort", None), "seconds": seconds,
             "fallback": fallback, "view": view, "attempts": attempts, "action": action, **(extra or {}),
         })
         if self.verbose:
@@ -195,7 +194,7 @@ class PokemonAgent:
         answer, attempts = self._ask(
             "draft_pick", DRAFT_SYSTEM, view, schema,
             lambda a: None if a.get("pick") in legal else f"pick must be one of {legal_ids}",
-            self._budget(state),
+            self._budget(state), provider=self.draft_provider,
         )
         fallback = answer is None
         pick = legal_ids[0] if fallback else answer["pick"]
@@ -247,6 +246,17 @@ class PokemonAgent:
 
         current = [species_key(((slots.get(n) or {}).get("active") or {}).get("species")) or None for n in (0, 1)]
         fresh = [current[n] != self._last_active[n] or not self._has_acted[n] for n in (0, 1)]
+
+        # Code-computed facts (damage, threats, speed). Never let a bug here cost the move.
+        facts, facts_lines, analysis_error = None, [], None
+        try:
+            facts = battle_facts(obs, self.book, my_side_id(obs))
+            # The battle log knows whether each Pokémon has moved since it came in;
+            # it beats our own tracking (and survives a process restart).
+            fresh = [f if f is not None else fresh[n] for n, f in enumerate(fresh_from_log(facts))]
+        except Exception as exc:  # noqa: BLE001
+            analysis_error = f"{type(exc).__name__}: {exc}"
+
         options: dict[int, list[Option]] = {}
         for n, letter in ((0, "a"), (1, "b")):
             slot = slots.get(n) or {"options": [{"type": "pass"}]}
@@ -257,7 +267,16 @@ class PokemonAgent:
             )
         by_id = {o.id: o for n in (0, 1) for o in options[n]}
 
-        view = battle_view(obs, options, self.book, self.opponent_preview)
+        if facts is not None:
+            try:
+                annotate_options(options, facts)
+                facts_lines = [speed_line(facts),
+                               "OPPONENT THREATS (their best attack on each of your active Pokémon):",
+                               *threat_lines(facts)]
+            except Exception as exc:  # noqa: BLE001
+                analysis_error = f"{type(exc).__name__}: {exc}"
+
+        view = battle_view(obs, options, self.book, self.opponent_preview, facts_lines)
         schema = _object_schema({
             "analysis": _TEXT,
             "slot_0": {"type": "string", "enum": [o.id for o in options[0]]},
@@ -288,6 +307,7 @@ class PokemonAgent:
 
         action = {"type": "doubles_turn", "slot_0": first.payload, "slot_1": second.payload}
         self._record(context, f"turn {obs.get('turn')}", started, view, attempts, action, fallback,
-                     {"options": {o.id: o.text for n in (0, 1) for o in options[n]}, "fresh": fresh})
+                     {"options": {o.id: o.text for n in (0, 1) for o in options[n]}, "fresh": fresh,
+                      "analysis_error": analysis_error})
         reason = None if fallback else answer.get("public_reason")
         return WithReasoning(action, reason) if reason else action

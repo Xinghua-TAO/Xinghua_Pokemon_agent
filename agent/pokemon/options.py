@@ -198,6 +198,8 @@ def combo_error(first: Option, second: Option) -> str | None:
 
 
 def _fallback_score(option: Option) -> float:
+    if "score" in option.extra:  # computed damage, see analysis.annotate_options
+        return option.extra["score"]
     if option.kind == "move":
         if option.damaging and (option.target is None or option.target > 0 or option.spread):
             return option.base_power * (0.75 if option.spread else 1.0) - (60 if option.hits_ally else 0)
@@ -207,13 +209,23 @@ def _fallback_score(option: Option) -> float:
     return 0.0
 
 
+def _pair_score(first: Option, second: Option) -> float:
+    score = _fallback_score(first) + _fallback_score(second)
+    # Don't spend both attacks on one target when either alone already KOs it.
+    for a, b in ((first, second), (second, first)):
+        target = a.payload.get("target")
+        if a.kind == b.kind == "move" and target and target > 0 and target == b.payload.get("target"):
+            if (a.extra.get("ko") or {}).get(target, 0) >= 0.9:
+                score -= 0.8 * _fallback_score(b)
+                break
+    return score
+
+
 def fallback_choice(slot0: list[Option], slot1: list[Option]) -> tuple[Option, Option]:
-    """A legal, non-random pair when the LLM can't answer in time: the
-    strongest attack at an opponent per slot, avoiding invalid combinations."""
-    ranked0 = sorted(slot0, key=_fallback_score, reverse=True)
-    ranked1 = sorted(slot1, key=_fallback_score, reverse=True)
-    for first in ranked0:
-        for second in ranked1:
-            if combo_error(first, second) is None:
-                return first, second
-    return ranked0[0], ranked1[0]
+    """A legal, non-random pair when the LLM can't answer in time: the best
+    combined damage (computed when available), avoiding invalid combinations
+    and overkill on a target one attack already knocks out."""
+    pairs = [(a, b) for a in slot0 for b in slot1 if combo_error(a, b) is None]
+    if not pairs:
+        return slot0[0], slot1[0]
+    return max(pairs, key=lambda pair: _pair_score(*pair))

@@ -55,7 +55,7 @@ def main() -> None:
     seat = re.search(r"_seat(\d+)\.jsonl$", args.raw_log.name)
     printer = _ViewPrinter(args.show_view)
     agent = PokemonAgent(provider=False if args.no_llm else None, log=printer, verbose=True, use_clock=False)
-    print(f"model: {getattr(agent.provider, 'model', None) or 'none (fallback only)'}")
+    print(f"battle model: {agent.provider!r}; draft model: {agent.draft_provider!r}")
 
     printed = 0
     for line in args.raw_log.read_text(encoding="utf-8").splitlines():

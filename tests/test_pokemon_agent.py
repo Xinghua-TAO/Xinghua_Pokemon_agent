@@ -3,7 +3,7 @@
 No network: the LLM is a fake that returns scripted answers.
 """
 
-import pytest
+import json
 
 from altruagent import DecisionContext, GameState, WithReasoning
 from agent.agent import GameRouter, create_agent
@@ -186,6 +186,45 @@ def test_battle_falls_back_when_model_fails():
     move = _agent(provider).choose_action(_doubles_state(), CTX)
     assert move["slot_0"]["move_id"] == "flareblitz" and move["slot_0"]["target"] > 0
     assert move["slot_1"]["move_id"] == "iciclecrash" and move["slot_1"]["target"] > 0
+
+
+# ---------------------------------------------------------------- model config
+
+def test_per_phase_models_from_env(monkeypatch):
+    from agent.pokemon.llm import DEFAULT_MODEL, providers_from_env
+
+    for name in ("POKEMON_MODEL", "POKEMON_DRAFT_MODEL", "POKEMON_REASONING_EFFORT", "POKEMON_DRAFT_REASONING_EFFORT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert providers_from_env() == (None, None)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    battle, draft = providers_from_env()
+    assert battle is draft and battle.model == DEFAULT_MODEL and battle.reasoning_effort is None
+    assert "sk-test" not in repr(battle)
+
+    monkeypatch.setenv("POKEMON_MODEL", "gpt-5.5")
+    monkeypatch.setenv("POKEMON_DRAFT_REASONING_EFFORT", "none")
+    battle, draft = providers_from_env()
+    assert (battle.model, battle.reasoning_effort) == ("gpt-5.5", None)
+    assert (draft.model, draft.reasoning_effort) == ("gpt-5.5", "none")
+
+
+def test_reasoning_effort_is_sent_only_when_set():
+    import httpx
+
+    from agent.pokemon.llm import ChatProvider
+
+    seen = []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"pick": "x"}'}}]})
+
+    for effort in (None, "low"):
+        provider = ChatProvider("sk-test", "gpt-5.5", reasoning_effort=effort, transport=httpx.MockTransport(handler))
+        assert provider.complete_structured([], "s", {}) == {"pick": "x"}
+    assert "reasoning_effort" not in seen[0] and seen[1]["reasoning_effort"] == "low"
 
 
 # ---------------------------------------------------------------- router

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 
+from .analysis import draft_card_summary, preview_lines
 from .cards import CardBook, format_card, species_key
 from .options import Option
 
@@ -30,6 +31,7 @@ Draft a TEAM, not six strong individuals:
 - Defensive type synergy: do not stack the same weaknesses; mix physical and special attackers. Protect on most members is valuable.
 - Denial: if a card would badly hurt your team or perfectly complete the opponent's, taking it first can be worth more than a small upgrade.
 Use the snake order: when the opponent picks twice in a row next, take the card you would hate to lose.
+Each card's types, actual Speed stat, roles and damage numbers are computed by code from the exact sets; trust them over your memory.
 
 Answer with: analysis (at most 60 words), pick (one card_id from the legal list), public_reason (at most 20 words; it is shown to spectators, so do not reveal your plan)."""
 
@@ -39,6 +41,7 @@ You see both full teams with exact sets. Choose the 4 Pokémon to bring and whic
 - Bring the 4 that best handle the opponent's likely four, covering their biggest threats.
 - Lead with a pair that applies immediate pressure or support (Fake Out, Intimidate, speed control, strong spread damage) and works well together.
 - Keep answers to the opponent's likely leads in the back.
+The damage tables and Speed tiers are computed by code from the exact sets; use them instead of guessing.
 
 Answer with: analysis (at most 60 words), bring (exactly 4 species ids from your roster), leads (exactly 2 of those 4), public_reason (at most 20 words, shown to spectators)."""
 
@@ -54,6 +57,7 @@ Doubles principles:
 - Switch out of a losing matchup when a benched Pokémon takes the hit well.
 - A move marked "ALSO HITS YOUR PARTNER" damages your own Pokémon unless the partner is immune (e.g. Earthquake vs a Flying type or Levitate).
 Opponent HP is a percentage. Opponent sets are exact: they come from the draft.
+Code computed the numbers for you (verified against the battle engine): each attack option's damage range and KO chance, the opponent's best attack on each of your Pokémon (THREATS), and this turn's Speed order. Base your choice on them; never assume a KO the numbers do not show. Ranges exclude critical hits and the opponent's choices this turn (e.g. Protect, switching, Intimidate).
 
 Answer with: analysis (at most 80 words), slot_0 and slot_1 (one option id each), public_reason (at most 20 words, shown to spectators)."""
 
@@ -107,11 +111,16 @@ def draft_view(obs: dict, me: str, legal_ids: list[str], book: CardBook) -> str:
     upcoming = SNAKE_ORDER[pick_number:pick_number + 3]
     upcoming_text = ", ".join("you" if letter == my_letter else "opponent" for letter in upcoming) or "none"
 
+    def card_of(entry: dict) -> dict | None:
+        return book.by_id(entry.get("card_id", "")) or book.by_species(entry.get("species"))
+
+    opponent_cards = [c for c in (card_of(e) for e in opponent) if c]
+
     def roster_lines(cards: list[dict]) -> list[str]:
         lines = []
         for entry in cards:
-            card = book.by_id(entry.get("card_id", "")) or book.by_species(entry.get("species"))
-            lines.append(f"  - {format_card(card) if card else entry.get('species')}")
+            card = card_of(entry)
+            lines.append(f"  - {format_card(card)} {draft_card_summary(card, [])}" if card else f"  - {entry.get('species')}")
         return lines or ["  (none yet)"]
 
     available = {c.get("card_id"): c for c in obs.get("available_cards") or [] if isinstance(c, dict)}
@@ -121,11 +130,12 @@ def draft_view(obs: dict, me: str, legal_ids: list[str], book: CardBook) -> str:
         f"After this pick, the next picks go to: {upcoming_text}.",
         f"YOUR ROSTER ({len(mine)}/6):", *roster_lines(mine),
         f"OPPONENT ROSTER ({len(opponent)}/6):", *roster_lines(opponent),
-        "LEGAL PICKS (card_id: set):",
+        "LEGAL PICKS (card_id: set [types; actual Speed; roles] + damage vs the opponent's picks, computed by code):",
     ]
     for card_id in legal_ids:
         card = available.get(card_id) or book.by_id(card_id)
-        lines.append(f"  - {card_id}: {format_card(card) if card else '?'}")
+        summary = draft_card_summary(card, opponent_cards) if card else ""
+        lines.append(f"  - {card_id}: {format_card(card) if card else '?'} {summary}")
     if blocked:
         lines.append("BLOCKED FOR YOU by Item Clause (the opponent may still take them):")
         lines += [f"  - {format_card(available[cid])}" for cid in blocked]
@@ -146,6 +156,7 @@ def team_preview_view(obs: dict, book: CardBook) -> str:
 
     lines = block("YOUR ROSTER (species id, types, base stats, set):", obs.get("your_roster") or [])
     lines += block("OPPONENT ROSTER:", obs.get("opponent_roster") or [])
+    lines += preview_lines(obs, book)
     return "\n".join(lines)
 
 
@@ -191,6 +202,7 @@ def battle_view(
     options: dict[int, list[Option]],
     book: CardBook,
     opponent_preview: list[dict],
+    facts_lines: list[str] | None = None,
 ) -> str:
     my_side = my_side_id(obs)
     switchable = {o.payload["species"] for slot_options in options.values() for o in slot_options if o.kind == "switch"}
@@ -265,8 +277,11 @@ def battle_view(
         lines.append("LAST TURN (Showdown log; OPP HP is out of 100):")
         lines += [f"  {line}" for line in log]
 
-    lines.append("YOUR OPTIONS:")
-    slot_names = {s: (actives[s] or {}).get("name") if s < len(actives) else None for s in (0, 1)}
+    if facts_lines:
+        lines += facts_lines
+    lines.append("YOUR OPTIONS (damage % of the target's max HP, KO chance vs its current HP; computed by code, "
+                 "no critical hits):")
+    slot_names ={s: (actives[s] or {}).get("name") if s < len(actives) else None for s in (0, 1)}
     for slot in (0, 1):
         lines.append(f"  slot {slot} ({slot_names.get(slot) or 'empty'}):")
         lines += [f"    {o.id}: {o.text}" for o in options.get(slot, [])]
