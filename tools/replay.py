@@ -49,12 +49,14 @@ def main() -> None:
     parser.add_argument("--show-view", action="store_true", help="print the text the model reads")
     parser.add_argument("--phase", choices=["draft", "team_preview", "moving"], help="only print this phase")
     parser.add_argument("--limit", type=int, default=0, help="stop after N printed decisions")
+    parser.add_argument("--opponent", default="", help="pretend the opponent has this name (uses logs/replay_memory/)")
     args = parser.parse_args()
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
     seat = re.search(r"_seat(\d+)\.jsonl$", args.raw_log.name)
     printer = _ViewPrinter(args.show_view)
-    agent = PokemonAgent(provider=False if args.no_llm else None, log=printer, verbose=True, use_clock=False)
+    agent = PokemonAgent(provider=False if args.no_llm else None, log=printer, verbose=True, use_clock=False,
+                         memory_dir=REPLAY_LOG_DIR.parent / "replay_memory", reflect=False)
     print(f"battle model: {agent.provider!r}; draft model: {agent.draft_provider!r}")
 
     printed = 0
@@ -72,6 +74,7 @@ def main() -> None:
             game_type=raw.get("game_type"),
             agent_id=(raw.get("current_actor") or {}).get("agent_id", ""),
             seat_position=int(seat.group(1)) if seat else None,
+            opponents=(args.opponent,) if args.opponent else (),
         )
         show = args.phase is None or state.phase == args.phase
         printer.show_view = args.show_view and show

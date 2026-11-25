@@ -229,6 +229,19 @@ def finished_line(final_state, agent_id: str, seat_position: int | None = None) 
     return f"finished: your agent{player} {outcome} ({detail})"
 
 
+def _notify_game_end(contestant, final_state, context, label: str) -> None:
+    """Call the contestant's optional ``on_game_end(final_state, context)``
+    once the game is over (e.g. to save what it learned about the opponent).
+    A failing hook is reported and ignored: the game is already finished."""
+    hook = getattr(contestant, "on_game_end", None)
+    if not callable(hook):
+        return
+    try:
+        hook(final_state, context)
+    except Exception as exc:  # noqa: BLE001
+        print_line(f"{label} on_game_end failed: {type(exc).__name__}: {exc}")
+
+
 class TournamentWorkerInput(NamedTuple):
     """Primitive, picklable description of one assigned seat (a Testing or
     tournament game). Carries no credential: the worker reads the Official
@@ -251,6 +264,10 @@ class TournamentWorkerInput(NamedTuple):
     # Handed over the process pipe only; kept out of repr like execution_id.
     # None (or an expired one) just means the worker signs in itself.
     agent_session: str | None = None
+    # Opponent display names and the round label from the assignment, handed
+    # to the contestant in DecisionContext (for per-opponent memory).
+    opponents: tuple[str, ...] = ()
+    round_label: str | None = None
 
     def __repr__(self) -> str:
         return (
@@ -369,9 +386,13 @@ def run_tournament_worker(
             game_type=grant.game_type,
             agent_id=grant.agent_id,
             seat_position=grant.seat_position,
+            opponents=tuple(worker_input.opponents or ()),
+            match_id=worker_input.match_id,
+            round_label=worker_input.round_label,
         )
         final_state = run_game_fn(game, context, contestant)
         print_line(f"{label} {finished_line(final_state, grant.agent_id, grant.seat_position)}")
+        _notify_game_end(contestant, final_state, context, label)
         return EXIT_SUCCESS
     except KeyboardInterrupt:
         print_line(f"{label} interrupted, stopping")

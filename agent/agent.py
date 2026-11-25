@@ -48,6 +48,14 @@ class GameRouter:
         if callable(handler):
             handler(result, context)
 
+    def on_game_end(self, final_state: GameState, context: DecisionContext) -> None:
+        """Called by the runtime (altruagent/worker.py) once the game is over."""
+        if self._agent is None:
+            return  # never asked for a move: nothing to remember
+        handler = getattr(self._agent, "on_game_end", None)
+        if callable(handler):
+            handler(final_state, context)
+
 
 def create_agent():
     return GameRouter()

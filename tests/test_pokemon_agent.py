@@ -188,6 +188,29 @@ def test_battle_falls_back_when_model_fails():
     assert move["slot_1"]["move_id"] == "iciclecrash" and move["slot_1"]["target"] > 0
 
 
+def test_slow_model_retries_with_fast_model_inside_the_budget():
+    slow = FakeProvider([ProviderError("OpenAI request failed (ReadTimeout)")])
+    slow.model = "slow"
+    fast = FakeProvider([{"analysis": "", "slot_0": "a2", "slot_1": "b1", "public_reason": "fast"}])
+    fast.model = "fast"
+    agent = PokemonAgent(slow, log=NullLog(), book=CardBook(), verbose=False)
+    agent.draft_provider = fast
+    move = agent.choose_action(_doubles_state(), CTX)
+    assert move.reasoning_summary == "fast"
+    assert agent.log.last["attempts"][0]["model"] == "slow" and agent.log.last["attempts"][1]["model"] == "fast"
+
+
+def test_low_time_bank_plays_with_the_fast_model():
+    slow = FakeProvider([])  # would fail if called
+    fast = FakeProvider([{"analysis": "", "slot_0": "a1", "slot_1": "b1", "public_reason": "quick"}])
+    agent = PokemonAgent(slow, log=NullLog(), book=CardBook(), verbose=False)
+    agent.draft_provider = fast
+    state = _doubles_state()
+    state.raw["observation"]["clock"] = {"decision_seconds_left": 45, "bank_seconds_left": 60}
+    assert agent.choose_action(state, CTX).reasoning_summary == "quick"
+    assert slow.calls == []
+
+
 # ---------------------------------------------------------------- model config
 
 def test_per_phase_models_from_env(monkeypatch):

@@ -38,6 +38,7 @@ class BattleFacts:
     my_moved: list[bool | None]  # per slot: has it moved since coming in (None = unknown)
     their_moved: list[bool | None]
     my_protect_streak: list[int]  # per slot: successful Protects in a row
+    their_protect_streak: list[int]
 
 
 def battle_facts(obs: dict, book: CardBook, my_side_id: str | None) -> BattleFacts:
@@ -63,7 +64,8 @@ def battle_facts(obs: dict, book: CardBook, my_side_id: str | None) -> BattleFac
     abilities = [m.ability for m in mine + theirs if m]
     fld, my_side, their_side = field_from_obs(obs, abilities)
     streaks = [log_facts.protect_streak.get((my_side_id, m.name), 0) if m else 0 for m in mine]
-    return BattleFacts(mine, theirs, fld, my_side, their_side, my_moved, their_moved, streaks)
+    their_streaks = [log_facts.protect_streak.get((their_id, m.name), 0) if m else 0 for m in theirs]
+    return BattleFacts(mine, theirs, fld, my_side, their_side, my_moved, their_moved, streaks, their_streaks)
 
 
 def _short(result: Damage) -> str:
@@ -141,6 +143,9 @@ def threat_lines(facts: BattleFacts) -> list[str]:
                 if (dex.move(m) or {}).get("cat") in ("Physical", "Special") and priority(opp, m, facts.field) > 0]
         if fast:
             extras.append("priority: " + ", ".join(fast))
+        streak = facts.their_protect_streak[index] if index < len(facts.their_protect_streak) else 0
+        if streak:
+            extras.append(f"Protected last turn: its next Protect works only {round(100 / 3 ** streak)}%")
         set_note = "" if opp.known_set else " (set unknown; assumed)"
         lines.append(f"  {opp.name}{set_note}: " + ("; ".join(pieces) or "no damaging moves")
                      + (f" [{'; '.join(extras)}]" if extras else ""))

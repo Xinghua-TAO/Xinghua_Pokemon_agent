@@ -32,3 +32,6 @@ htmlcov/
 
 # Local game logs (raw states, LLM transcripts)
 logs/
+
+# Per-opponent memory across games (tournament intel; agent/pokemon/memory.py)
+memory/

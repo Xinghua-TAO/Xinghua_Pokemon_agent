@@ -708,3 +708,10 @@ class DecisionContext:
     agent_id: str
     seat_position: int | None = None
     game_config: dict | None = None
+    # Added for our team's agent: who we play and which match/round this is,
+    # copied from the server's assignment (OfficialAssignment) by the worker.
+    # Opponent display names are stable across games, so agents can keep
+    # per-opponent memory (e.g. over a best-of-3 series).
+    opponents: tuple[str, ...] = ()
+    match_id: str | None = None
+    round_label: str | None = None

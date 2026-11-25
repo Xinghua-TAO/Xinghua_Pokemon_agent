@@ -279,6 +279,26 @@
    "Protect"
   ]
  },
+ "vgc-great-tusk": {
+  "card_id": "vgc-great-tusk",
+  "species": "Great Tusk",
+  "item": "Booster Energy",
+  "ability": "Protosynthesis",
+  "nature": "Jolly",
+  "level": 50,
+  "evs": {
+   "hp": 252,
+   "atk": 252,
+   "spe": 4
+  },
+  "ivs": {},
+  "moves": [
+   "Headlong Rush",
+   "Close Combat",
+   "Rock Slide",
+   "Protect"
+  ]
+ },
  "vgc-grimmsnarl": {
   "card_id": "vgc-grimmsnarl",
   "species": "Grimmsnarl",
@@ -416,6 +436,26 @@
    "Moonblast",
    "Close Combat",
    "Thunderbolt",
+   "Protect"
+  ]
+ },
+ "vgc-kingambit": {
+  "card_id": "vgc-kingambit",
+  "species": "Kingambit",
+  "item": "Black Glasses",
+  "ability": "Supreme Overlord",
+  "nature": "Adamant",
+  "level": 50,
+  "evs": {
+   "hp": 252,
+   "atk": 252,
+   "spe": 4
+  },
+  "ivs": {},
+  "moves": [
+   "Sucker Punch",
+   "Iron Head",
+   "Kowtow Cleave",
    "Protect"
   ]
  },

@@ -31,6 +31,7 @@ Draft a TEAM, not six strong individuals:
 - Defensive type synergy: do not stack the same weaknesses; mix physical and special attackers. Protect on most members is valuable.
 - Denial: if a card would badly hurt your team or perfectly complete the opponent's, taking it first can be worth more than a small upgrade.
 Use the snake order: when the opponent picks twice in a row next, take the card you would hate to lose.
+If an OPPONENT HISTORY is shown (earlier games vs this same opponent), use it: anticipate the cards and plans they favor.
 Each card's types, actual Speed stat, roles and damage numbers are computed by code from the exact sets; trust them over your memory.
 
 Answer with: analysis (at most 60 words), pick (one card_id from the legal list), public_reason (at most 20 words; it is shown to spectators, so do not reveal your plan)."""
@@ -42,6 +43,7 @@ You see both full teams with exact sets. Choose the 4 Pokémon to bring and whic
 - Lead with a pair that applies immediate pressure or support (Fake Out, Intimidate, speed control, strong spread damage) and works well together.
 - Keep answers to the opponent's likely leads in the back.
 The damage tables and Speed tiers are computed by code from the exact sets; use them instead of guessing.
+If an OPPONENT HISTORY is shown, use their past leads and turn-1 habits to pick leads that beat what they usually do.
 
 Answer with: analysis (at most 60 words), bring (exactly 4 species ids from your roster), leads (exactly 2 of those 4), public_reason (at most 20 words, shown to spectators)."""
 
@@ -58,6 +60,7 @@ Doubles principles:
 - A move marked "ALSO HITS YOUR PARTNER" damages your own Pokémon unless the partner is immune (e.g. Earthquake vs a Flying type or Levitate).
 Opponent HP is a percentage. Opponent sets are exact: they come from the draft.
 Code computed the numbers for you (verified against the battle engine): each attack option's damage range and KO chance, the opponent's best attack on each of your Pokémon (THREATS), and this turn's Speed order. Base your choice on them; never assume a KO the numbers do not show. Ranges exclude critical hits and the opponent's choices this turn (e.g. Protect, switching, Intimidate).
+Predict the opponent: OPPONENT THIS GAME and OPPONENT HISTORY show what they actually did (Protect timing, double-targeting, switching); a Pokémon that just Protected is unlikely to Protect again.
 
 Answer with: analysis (at most 80 words), slot_0 and slot_1 (one option id each), public_reason (at most 20 words, shown to spectators)."""
 
@@ -102,7 +105,7 @@ def _card_line(book: CardBook, species: str | None, entry: dict | None) -> str:
 
 # ---------------------------------------------------------------- draft
 
-def draft_view(obs: dict, me: str, legal_ids: list[str], book: CardBook) -> str:
+def draft_view(obs: dict, me: str, legal_ids: list[str], book: CardBook, history: list[str] | None = None) -> str:
     rosters = obs.get("rosters") or {}
     mine = rosters.get(me) or []
     opponent = next((cards for seat, cards in rosters.items() if seat != me), [])
@@ -139,12 +142,13 @@ def draft_view(obs: dict, me: str, legal_ids: list[str], book: CardBook) -> str:
     if blocked:
         lines.append("BLOCKED FOR YOU by Item Clause (the opponent may still take them):")
         lines += [f"  - {format_card(available[cid])}" for cid in blocked]
+    lines += history or []
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- team preview
 
-def team_preview_view(obs: dict, book: CardBook) -> str:
+def team_preview_view(obs: dict, book: CardBook, history: list[str] | None = None) -> str:
     def block(title: str, roster: list[dict]) -> list[str]:
         out = [title]
         for entry in roster:
@@ -157,6 +161,7 @@ def team_preview_view(obs: dict, book: CardBook) -> str:
     lines = block("YOUR ROSTER (species id, types, base stats, set):", obs.get("your_roster") or [])
     lines += block("OPPONENT ROSTER:", obs.get("opponent_roster") or [])
     lines += preview_lines(obs, book)
+    lines += history or []
     return "\n".join(lines)
 
 

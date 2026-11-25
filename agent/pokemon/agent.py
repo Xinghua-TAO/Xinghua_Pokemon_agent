@@ -10,11 +10,15 @@ Every decision follows the same loop:
      (logged as FALLBACK), never a random move;
   5. everything (view, menu, answers, timing) is written to logs/decisions/
      as a trace, so a lost game can be debugged step by step.
+
+Across games, memory.py keeps what each opponent did (draft, leads, habits)
+and shows it in the next game against the same opponent.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +29,7 @@ from examples.llm.providers import ProviderError
 from .analysis import annotate_options, battle_facts, fresh_from_log, speed_line, threat_lines
 from .cards import CardBook, species_key
 from .llm import providers_from_env
+from .memory import OpponentMemory, history_lines, now_iso, parse_battle, this_game_lines
 from .options import Option, build_slot_options, combo_error, fallback_choice
 from .views import (
     BATTLE_SYSTEM, DRAFT_SYSTEM, PREVIEW_SYSTEM, battle_view, draft_view, my_side_id, team_preview_view,
@@ -33,13 +38,23 @@ from .views import (
 # Time budgets (seconds), always inside the server's own limits:
 # draft picks have 15 s; the platform plays a random move after 50 s a turn
 # (85 s at Team Preview); the whole battle has a 420 s bank.
+# A strong model (gpt-5.5) takes ~10 s a turn with a long tail, so the first
+# attempt may take most of the budget, but always leaves FAST_RESERVE for a
+# second attempt with the fast provider (the draft model, effort "none").
 DRAFT_BUDGET, DRAFT_MARGIN = 10.0, 3.0
-PREVIEW_BUDGET = 30.0
-TURN_BUDGET = 25.0
+PREVIEW_BUDGET, PREVIEW_REQUEST = 70.0, 45.0
+TURN_BUDGET, TURN_REQUEST = 40.0, 30.0
 CLOCK_MARGIN = 8.0
-REQUEST_TIMEOUT = 20.0
+FAST_RESERVE = 8.0
+LOW_BANK = 120.0  # below this many bank seconds, play turns with the fast provider
+LOW_BANK_BUDGET = 12.0
 MIN_ATTEMPT = 2.0
 MAX_ATTEMPTS = 2
+REFLECT_TIMEOUT = 30.0
+
+REFLECT_SYSTEM = """You review a finished Pokémon VGC doubles game so we play better against the SAME opponent next time (for example the next game of a best-of-3 series).
+Write at most 3 short notes (each at most 25 words): concrete habits of the opponent that the facts show (draft priorities, leads, turn-1 plays, targeting, Protect timing, switching), and at most 1 lesson about our own play.
+State only what the facts support; do not guess. Answer with: notes (a list of strings)."""
 
 LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "decisions"
 
@@ -74,8 +89,15 @@ class DecisionLog:
 
 class PokemonAgent:
     def __init__(self, provider=None, *, log: DecisionLog | None = None, book: CardBook | None = None,
-                 verbose: bool = True, use_clock: bool = True) -> None:
+                 verbose: bool = True, use_clock: bool = True, memory_dir: Path | None = None,
+                 reflect: bool | None = None) -> None:
         self.use_clock = use_clock  # False for offline replays of recorded states
+        self.memory_dir = memory_dir  # None: memory/opponents/ in the repo
+        # After each game, ask the LLM for short notes on the opponent (POKEMON_REFLECT=0 turns it off).
+        self.reflect = (os.environ.get("POKEMON_REFLECT", "1") != "0") if reflect is None else reflect
+        self.memory: OpponentMemory | None = None
+        self.record: dict | None = None  # this game, as it will be remembered
+        self.past: list[dict] = []  # earlier games against this opponent
         # provider=None: from the environment (battle + draft models, see llm.py);
         # provider=False: no LLM (fallback only); a provider object: used for every phase.
         if provider is None:
@@ -93,40 +115,120 @@ class PokemonAgent:
     # ------------------------------------------------------------ entry point
 
     def choose_action(self, state: GameState, context: DecisionContext):
-        if state.phase == "draft":
-            return self._draft(state, context)
-        if state.phase == "team_preview":
-            return self._team_preview(state, context)
-        if state.phase == "moving":
-            return self._battle(state, context)
-        return state.legal_actions[0]  # other Pokémon formats are not in the UCLA event
+        self._begin(context)
+        try:
+            if state.phase == "draft":
+                return self._draft(state, context)
+            if state.phase == "team_preview":
+                return self._team_preview(state, context)
+            if state.phase == "moving":
+                return self._battle(state, context)
+            return state.legal_actions[0]  # other Pokémon formats are not in the UCLA event
+        finally:
+            self._save()
+
+    # ------------------------------------------------------------ memory
+
+    def _begin(self, context: DecisionContext) -> None:
+        """On this game's first decision: find the opponent's memory and start
+        this game's record (or pick it up again after a restart)."""
+        if self.record is not None:
+            return
+        name = next((o for o in (context.opponents or ()) if o), "")
+        self.memory = OpponentMemory(name, self.memory_dir) if name else None
+        existing = None
+        if self.memory:
+            games = self.memory.load()["games"]
+            existing = next((g for g in games if g.get("session_id") == context.session_id), None)
+            self.past = [g for g in games if g.get("session_id") != context.session_id]
+        self.record = existing or {
+            "session_id": context.session_id, "match_id": context.match_id, "round": context.round_label,
+            "tournament": bool(context.tournament_id), "opponent": name, "started_at": now_iso(),
+            "result": None, "their_picks": [], "our_picks": [], "their_roster": [], "our_bring": [],
+            "our_leads": [], "battle": {}, "our_moves": {}, "notes": [],
+        }
+        if self.verbose:
+            if self.memory:
+                print(f"[pokemon] memory: {len(self.past)} earlier game(s) vs {name}", flush=True)
+            else:
+                print("[pokemon] memory: off (no opponent name, e.g. self-play)", flush=True)
+
+    def _save(self) -> None:
+        if self.memory and self.record:
+            self.memory.save_game(self.record)
+
+    def _history(self, *, brief: bool = False) -> list[str]:
+        if not self.memory:
+            return []
+        return history_lines(self.memory.name, self.past, brief=brief)
+
+    def on_game_end(self, final_state: GameState, context: DecisionContext) -> None:
+        """Called by the runtime once the game is over: store the result and,
+        optionally, the LLM's short notes about this opponent."""
+        if not self.record or not self.memory:
+            return  # no opponent name (e.g. self-play): nothing to remember, no LLM call
+        result = getattr(final_state, "final_result", None) or {}
+        your_return = result.get("your_return")
+        self.record["result"] = {1.0: "win", 0.0: "loss", 0.5: "draw"}.get(
+            float(your_return) if isinstance(your_return, (int, float)) else -1.0)
+        self.record["termination"] = result.get("termination_reason")
+        self.record["finished_at"] = now_iso()
+        if self.reflect and self.provider and self.record.get("battle"):
+            self.record["notes"] = self._reflect()
+        self._save()
+
+    def _reflect(self) -> list[str]:
+        record = self.record or {}
+        battle = record.get("battle") or {}
+        facts = {
+            "result for us": record.get("result"),
+            "their draft picks in order": record.get("their_picks"),
+            "our draft picks": record.get("our_picks"),
+            "their leads": battle.get("leads"), "they brought": battle.get("brought"),
+            "our leads": record.get("our_leads"), "we brought": record.get("our_bring"),
+            "their moves by turn [pokemon, move, target]": battle.get("moves_by_turn"),
+            "our moves by turn": record.get("our_moves"),
+        }
+        schema = _object_schema({"notes": {"type": "array", "items": _TEXT}})
+        answer, _ = self._ask("game_notes", REFLECT_SYSTEM, json.dumps(facts, ensure_ascii=False), schema,
+                              lambda a: None if isinstance(a.get("notes"), list) else "notes must be a list",
+                              REFLECT_TIMEOUT, request_timeout=REFLECT_TIMEOUT)
+        return [str(n)[:300] for n in (answer or {}).get("notes", [])][:4]
 
     # ------------------------------------------------------------ LLM helper
 
     def _ask(self, name: str, system: str, view: str, schema: dict, validate, budget: float,
-             provider=None) -> tuple[dict | None, list]:
+             provider=None, retry_provider=None, request_timeout: float = 20.0) -> tuple[dict | None, list]:
         """Ask the model until ``validate(answer)`` returns None (no error).
-        Returns (answer or None, attempt records)."""
-        provider = provider or self.provider
+        The second attempt uses ``retry_provider`` (a faster model setting)
+        when given. Returns (answer or None, attempt records)."""
+        first = provider or self.provider
+        second = retry_provider or first
         attempts: list[dict] = []
-        if provider is None:
+        if first is None:
             attempts.append({"error": "no OPENAI_API_KEY; using fallback"})
             return None, attempts
         deadline = time.monotonic() + budget
         messages = [{"role": "system", "content": system}, {"role": "user", "content": view}]
-        for _ in range(MAX_ATTEMPTS):
+        for attempt in range(MAX_ATTEMPTS):
+            current = first if attempt == 0 else second
             left = deadline - time.monotonic()
             if left < MIN_ATTEMPT:
                 attempts.append({"error": f"out of time ({left:.1f}s left)"})
                 break
+            limit = min(request_timeout, left)
+            if attempt == 0 and second is not first:
+                limit = min(limit, max(MIN_ATTEMPT, left - FAST_RESERVE))  # keep time for the fast retry
             started = time.monotonic()
+            model = getattr(current, "model", None)
             try:
-                answer = provider.complete_structured(messages, name, schema, timeout=min(REQUEST_TIMEOUT, left))
+                answer = current.complete_structured(messages, name, schema, timeout=limit)
             except ProviderError as exc:
-                attempts.append({"error": str(exc), "seconds": round(time.monotonic() - started, 2)})
+                attempts.append({"error": str(exc), "model": model, "seconds": round(time.monotonic() - started, 2)})
                 continue
             error = validate(answer)
-            attempts.append({"answer": answer, "error": error, "seconds": round(time.monotonic() - started, 2)})
+            attempts.append({"answer": answer, "error": error, "model": model,
+                             "seconds": round(time.monotonic() - started, 2)})
             if error is None:
                 return answer, attempts
             messages += [
@@ -170,10 +272,26 @@ class PokemonAgent:
                     pass
             return max(0.0, min(DRAFT_BUDGET, left - DRAFT_MARGIN))
         cap = PREVIEW_BUDGET if state.phase == "team_preview" else TURN_BUDGET
+        if self._low_bank(state):
+            cap = min(cap, LOW_BANK_BUDGET)
         left = ((obs.get("clock") or {}).get("decision_seconds_left"))
         if not isinstance(left, (int, float)):
             return cap
         return max(0.0, min(cap, left - CLOCK_MARGIN))
+
+    @staticmethod
+    def _low_bank(state: GameState) -> bool:
+        """The 420 s battle bank is running low: answer fast from now on."""
+        obs = (state.raw or {}).get("observation") or {}
+        bank = (obs.get("clock") or {}).get("bank_seconds_left")
+        return state.phase == "moving" and isinstance(bank, (int, float)) and bank < LOW_BANK
+
+    def _providers_for(self, state: GameState) -> tuple:
+        """(first, retry) providers for a Team Preview or battle decision."""
+        fast = self.draft_provider or self.provider
+        if self._low_bank(state):
+            return fast, fast
+        return self.provider, (fast if fast is not self.provider else None)
 
     # ------------------------------------------------------------ draft
 
@@ -189,12 +307,15 @@ class PokemonAgent:
         if not legal:
             return state.legal_actions[0]
         legal_ids = list(legal)
-        view = draft_view(obs, context.agent_id, legal_ids, self.book)
+        picks = [p for p in obs.get("picks") or [] if isinstance(p, dict)]
+        self.record["our_picks"] = [p.get("species") for p in picks if p.get("seat_id") == context.agent_id]
+        self.record["their_picks"] = [p.get("species") for p in picks if p.get("seat_id") != context.agent_id]
+        view = draft_view(obs, context.agent_id, legal_ids, self.book, self._history())
         schema = _object_schema({"analysis": _TEXT, "pick": {"type": "string", "enum": legal_ids}, "public_reason": _TEXT})
         answer, attempts = self._ask(
             "draft_pick", DRAFT_SYSTEM, view, schema,
             lambda a: None if a.get("pick") in legal else f"pick must be one of {legal_ids}",
-            self._budget(state), provider=self.draft_provider,
+            self._budget(state), provider=self.draft_provider, request_timeout=DRAFT_BUDGET,
         )
         fallback = answer is None
         pick = legal_ids[0] if fallback else answer["pick"]
@@ -210,7 +331,8 @@ class PokemonAgent:
         self.opponent_preview = [e for e in obs.get("opponent_roster") or [] if isinstance(e, dict)]
         template = state.legal_actions[0].input.get("action") or {}
         roster = [s for s in template.get("roster") or [] if isinstance(s, str)]
-        view = team_preview_view(obs, self.book)
+        self.record["their_roster"] = [e.get("species") for e in self.opponent_preview]
+        view = team_preview_view(obs, self.book, self._history())
         species = {"type": "array", "items": {"type": "string", "enum": roster}}
         schema = _object_schema({"analysis": _TEXT, "bring": species, "leads": species, "public_reason": _TEXT})
 
@@ -222,11 +344,14 @@ class PokemonAgent:
                 return "leads must be exactly 2 different species that are also in bring"
             return None
 
-        answer, attempts = self._ask("select_lineup", PREVIEW_SYSTEM, view, schema, validate, self._budget(state))
+        first, retry = self._providers_for(state)
+        answer, attempts = self._ask("select_lineup", PREVIEW_SYSTEM, view, schema, validate, self._budget(state),
+                                     provider=first, retry_provider=retry, request_timeout=PREVIEW_REQUEST)
         fallback = answer is None
         bring = roster[:4] if fallback else answer["bring"]
         leads = bring[:2] if fallback else answer["leads"]
         action = {"type": "select_lineup", "bring": bring, "leads": leads}
+        self.record["our_bring"], self.record["our_leads"] = list(bring), list(leads)
         self._record(context, "team_preview", started, view, attempts, action, fallback)
         reason = None if fallback else answer.get("public_reason")
         return WithReasoning(action, reason) if reason else action
@@ -275,6 +400,11 @@ class PokemonAgent:
                                *threat_lines(facts)]
             except Exception as exc:  # noqa: BLE001
                 analysis_error = f"{type(exc).__name__}: {exc}"
+        try:  # what this opponent did so far, and in earlier games
+            self.record["battle"] = parse_battle(obs.get("protocol_log") or [], my_side_id(obs))
+            facts_lines += this_game_lines(self.record["battle"]) + self._history(brief=True)
+        except Exception as exc:  # noqa: BLE001
+            analysis_error = analysis_error or f"memory: {type(exc).__name__}: {exc}"
 
         view = battle_view(obs, options, self.book, self.opponent_preview, facts_lines)
         schema = _object_schema({
@@ -292,7 +422,9 @@ class PokemonAgent:
                 return "slot_1 must be one of the slot 1 option ids"
             return combo_error(first, second)
 
-        answer, attempts = self._ask("doubles_turn", BATTLE_SYSTEM, view, schema, validate, self._budget(state))
+        first_provider, retry = self._providers_for(state)
+        answer, attempts = self._ask("doubles_turn", BATTLE_SYSTEM, view, schema, validate, self._budget(state),
+                                     provider=first_provider, retry_provider=retry, request_timeout=TURN_REQUEST)
         fallback = answer is None
         if fallback:
             first, second = fallback_choice(options[0], options[1])
@@ -306,6 +438,13 @@ class PokemonAgent:
             self._last_active[n] = current[n]
 
         action = {"type": "doubles_turn", "slot_0": first.payload, "slot_1": second.payload}
+        turn_moves = self.record.setdefault("our_moves", {}).setdefault(str(obs.get("turn")), [])
+        for n, choice in ((0, first), (1, second)):
+            if choice.kind == "pass":
+                continue
+            name = ((slots.get(n) or {}).get("active") or {}).get("name")
+            what = choice.payload.get("move_id") or f"switch to {choice.payload.get('species')}"
+            turn_moves.append([name, what, choice.payload.get("target")])
         self._record(context, f"turn {obs.get('turn')}", started, view, attempts, action, fallback,
                      {"options": {o.id: o.text for n in (0, 1) for o in options[n]}, "fresh": fresh,
                       "analysis_error": analysis_error})
