@@ -661,6 +661,26 @@
    "Protect"
   ]
  },
+ "vgc-sylveon": {
+  "card_id": "vgc-sylveon",
+  "species": "Sylveon",
+  "item": "Wiki Berry",
+  "ability": "Pixilate",
+  "nature": "Modest",
+  "level": 50,
+  "evs": {
+   "hp": 244,
+   "spa": 252,
+   "spd": 12
+  },
+  "ivs": {},
+  "moves": [
+   "Hyper Voice",
+   "Shadow Ball",
+   "Calm Mind",
+   "Protect"
+  ]
+ },
  "vgc-talonflame": {
   "card_id": "vgc-talonflame",
   "species": "Talonflame",
