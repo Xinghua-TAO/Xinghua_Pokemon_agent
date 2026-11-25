@@ -63,3 +63,29 @@ measured on live games.
 - **The future-picks proxy is crude.** The undrafted pool stands in for the
   opponent's future picks, so every remaining card counts, not only those they
   are likely to take.
+
+## A/B test: does it win more?
+
+Replays show the decisions change, not that they're better. To measure it:
+
+1. Start the runtime with the switch on:
+   `POKEMON_AB_TEAMBUILD=1 RECORDER_INNER=agent.agent python -m agent --match --agent tools.recorder`
+2. Create self-play Testing matches (both seats "Mine (self-hosted)").
+3. Each game, one seat is **ranked** (sees the CODE-RANKED shortlists) and
+   the other is **plain** (the agent before this change, including its old
+   first-legal fallback). Which seat gets which comes from a hash of the
+   session id, so it changes from game to game, and draft order is
+   balanced on average.
+4. Both seats battle with identical code, so a difference in wins comes from
+   the draft and Team Preview alone.
+5. Each seat appends its arm and result to `logs/ab/teambuild.jsonl`.
+   `python -m tools.ab_report` pairs the seats of each game. It prints the
+   ranked arm's win rate with a Wilson 95% interval and an exact binomial
+   test against 50%, also split by which arm drafted first.
+
+Sample size (two-sided α = 0.05, 80% power): ~200 games detect a true
+60% win rate, ~85 detect 65%, ~50 detect 70%. A small run only catches a
+large effect or a regression.
+
+The switch is off unless `POKEMON_AB_TEAMBUILD=1` is set; tournament games
+always use the ranking.

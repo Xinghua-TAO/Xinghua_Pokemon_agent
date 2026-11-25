@@ -17,16 +17,17 @@ and shows it in the next game against the same opponent.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from altruagent import DecisionContext, GameState, WithReasoning
+from altruagent.worker import game_outcome
 from examples.llm.providers import ProviderError
-
-from collections import Counter
 
 from .analysis import (
     annotate_options, assume_booster, battle_facts, card_mon, double_target_lines, fresh_from_log, speed_line,
@@ -60,6 +61,26 @@ REFLECT_TIMEOUT = 30.0
 
 LOG_DIR = Path(__file__).resolve().parents[2] / "logs" / "decisions"
 
+# A/B test of code-ranked team building (docs/team_building.md). With
+# POKEMON_AB_TEAMBUILD=1, the two seats of a self-play game get opposite
+# arms: "ranked" sees the CODE-RANKED shortlists, "plain" does not. Battles
+# are identical, so a difference in wins comes from the draft and Team
+# Preview. Each seat appends its result to AB_DIR/teambuild.jsonl
+# (tools/ab_report.py sums them up).
+AB_ENV = "POKEMON_AB_TEAMBUILD"
+AB_DIR = Path(__file__).resolve().parents[2] / "logs" / "ab"
+
+
+def ab_arm(session_id: str, seat_position: int | None, agent_id: str = "") -> str:
+    """Opposite arms for the two seats of one game; which seat gets which
+    changes from game to game (a hash of the session id, the same in both
+    seat processes, unlike Python's salted hash())."""
+    digest = int(hashlib.sha256(session_id.encode()).hexdigest()[:8], 16)
+    if not isinstance(seat_position, int):  # unknown seat: a coin flip per seat
+        digest = int(hashlib.sha256(f"{session_id}:{agent_id}".encode()).hexdigest()[:8], 16)
+        seat_position = 0
+    return "ranked" if (digest + seat_position) % 2 == 0 else "plain"
+
 
 def _object_schema(properties: dict) -> dict:
     return {"type": "object", "additionalProperties": False, "properties": properties, "required": list(properties)}
@@ -92,7 +113,7 @@ class DecisionLog:
 class PokemonAgent:
     def __init__(self, provider=None, *, log: DecisionLog | None = None, book: CardBook | None = None,
                  verbose: bool = True, use_clock: bool = True, memory_dir: Path | None = None,
-                 reflect: bool | None = None, prompt_version: str | None = None) -> None:
+                 reflect: bool | None = None, prompt_version: str | None = None, ab: bool | None = None) -> None:
         self.use_clock = use_clock  # False for offline replays of recorded states
         self.prompt_version = prompt_version or promptbook.current_version()
         self.prompts = promptbook.load(self.prompt_version)  # draft / preview / battle / reflect
@@ -112,6 +133,9 @@ class PokemonAgent:
         self.log = log or DecisionLog()
         self.verbose = verbose
         self.opponent_preview: list[dict] = []
+        self.ab = os.environ.get(AB_ENV, "0") not in ("", "0") if ab is None else ab
+        self.arm: str | None = None  # A/B arm of this game, when the A/B test is on
+        self.use_ranking = True  # show the CODE-RANKED shortlists (off in the A/B "plain" arm)
         # Fake Out works only on a Pokémon's first turn on the field.
         self._last_active: list[str | None] = [None, None]
         self._has_acted: list[bool] = [False, False]
@@ -151,6 +175,12 @@ class PokemonAgent:
             "result": None, "their_picks": [], "our_picks": [], "their_roster": [], "our_bring": [],
             "our_leads": [], "battle": {}, "our_moves": {}, "notes": [],
         }
+        if self.ab:
+            self.arm = ab_arm(context.session_id, context.seat_position, context.agent_id)
+            self.use_ranking = self.arm == "ranked"
+            self.record["ab_arm"] = self.arm
+            if self.verbose:
+                print(f"[pokemon] A/B team building: this seat is '{self.arm}'", flush=True)
         if self.verbose:
             if self.memory:
                 print(f"[pokemon] memory: {len(self.past)} earlier game(s) vs {name}", flush=True)
@@ -169,17 +199,35 @@ class PokemonAgent:
     def on_game_end(self, final_state: GameState, context: DecisionContext) -> None:
         """Called by the runtime once the game is over: store the result and,
         optionally, the LLM's short notes about this opponent."""
-        if not self.record or not self.memory:
-            return  # no opponent name (e.g. self-play): nothing to remember, no LLM call
-        result = getattr(final_state, "final_result", None) or {}
-        your_return = result.get("your_return")
-        self.record["result"] = {1.0: "win", 0.0: "loss", 0.5: "draw"}.get(
-            float(your_return) if isinstance(your_return, (int, float)) else -1.0)
-        self.record["termination"] = result.get("termination_reason")
+        if not self.record:
+            return
+        outcome = game_outcome(final_state, getattr(context, "agent_id", ""))  # the runtime's own reading of the result
+        self.record["result"] = {"won": "win", "lost": "loss", "drew": "draw"}.get(outcome, outcome)
+        self.record["termination"] = getattr(final_state, "termination_reason", None) or (
+            (getattr(final_state, "final_result", None) or {}).get("termination_reason"))
         self.record["finished_at"] = now_iso()
+        if self.arm:
+            self._write_ab(context)
+        if not self.memory:
+            return  # no opponent name (e.g. self-play): nothing to remember, no LLM call
         if self.reflect and self.provider and self.record.get("battle"):
             self.record["notes"] = self._reflect()
         self._save()
+
+    def _write_ab(self, context: DecisionContext) -> None:
+        keys = ("session_id", "match_id", "ab_arm", "result", "termination", "drafted_first", "fallbacks",
+                "our_picks", "their_picks", "our_bring", "our_leads", "started_at", "finished_at")
+        row = {k: self.record.get(k) for k in keys}
+        row.update(seat=context.seat_position, agent_id=context.agent_id, prompt_version=self.prompt_version,
+                   model=getattr(self.provider, "model", None))
+        try:
+            AB_DIR.mkdir(parents=True, exist_ok=True)
+            with open(AB_DIR / "teambuild.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")  # one write: both seats append safely
+        except OSError as exc:
+            print(f"[pokemon] could not save the A/B result: {exc}", flush=True)
+        if self.verbose:
+            print(f"[pokemon] A/B result: arm {self.arm}, {row['result']} ({row['termination']})", flush=True)
 
     def _reflect(self) -> list[str]:
         record = self.record or {}
@@ -248,8 +296,11 @@ class PokemonAgent:
         self.log.write(context, {
             "phase": phase, "prompt_version": self.prompt_version, "model": getattr(provider, "model", None),
             "reasoning_effort": getattr(provider, "reasoning_effort", None), "seconds": seconds,
-            "fallback": fallback, "view": view, "attempts": attempts, "action": action, **(extra or {}),
+            "fallback": fallback, "view": view, "attempts": attempts, "action": action, "ab_arm": self.arm,
+            **(extra or {}),
         })
+        if fallback and self.record is not None:
+            self.record["fallbacks"] = self.record.get("fallbacks", 0) + 1
         if self.verbose:
             reason = ""
             for attempt in reversed(attempts):
@@ -314,10 +365,13 @@ class PokemonAgent:
         picks = [p for p in obs.get("picks") or [] if isinstance(p, dict)]
         self.record["our_picks"] = [p.get("species") for p in picks if p.get("seat_id") == context.agent_id]
         self.record["their_picks"] = [p.get("species") for p in picks if p.get("seat_id") != context.agent_id]
+        if obs.get("first_drafter"):
+            self.record["drafted_first"] = obs["first_drafter"] == context.agent_id
         ranked, rank_lines, rank_error = [], [], None
         try:
-            ranked, opponent_next = self._rank_draft(obs, context, legal_ids)
-            rank_lines = draft_lines(ranked, opponent_next)
+            if self.use_ranking:
+                ranked, opponent_next = self._rank_draft(obs, context, legal_ids)
+                rank_lines = draft_lines(ranked, opponent_next)
         except Exception as exc:  # noqa: BLE001 - the ranking is advice; never let it cost the pick
             rank_error = f"{type(exc).__name__}: {exc}"
         view = draft_view(obs, context.agent_id, legal_ids, self.book, rank_lines + self._history())
@@ -371,9 +425,10 @@ class PokemonAgent:
         self.record["their_roster"] = [e.get("species") for e in self.opponent_preview]
         ranked, rank_lines, rank_error = [], [], None
         try:
-            ranked = self._rank_lineups(obs)
-            ranked = [r for r in ranked if set(r["bring"]) <= set(roster)]
-            rank_lines = lineup_lines(ranked)
+            if self.use_ranking:
+                ranked = self._rank_lineups(obs)
+                ranked = [r for r in ranked if set(r["bring"]) <= set(roster)]
+                rank_lines = lineup_lines(ranked)
         except Exception as exc:  # noqa: BLE001 - advice only
             rank_error = f"{type(exc).__name__}: {exc}"
         view = team_preview_view(obs, self.book, rank_lines + self._history())

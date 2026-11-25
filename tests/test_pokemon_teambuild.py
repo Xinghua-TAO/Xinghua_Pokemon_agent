@@ -2,6 +2,7 @@
 the agent uses it at the draft and Team Preview. No network."""
 
 from itertools import combinations
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,7 +116,8 @@ CTX = DecisionContext(session_id="s", tournament_id=None, game_type="pokemon_vgc
 
 
 def _agent(provider):
-    agent = PokemonAgent(provider, log=NullLog(), book=CardBook(), verbose=False, use_clock=False, reflect=False)
+    agent = PokemonAgent(provider, log=NullLog(), book=CardBook(), verbose=False, use_clock=False, reflect=False,
+                         ab=False)
     agent.past = []
     return agent
 
@@ -191,3 +193,93 @@ def test_preview_falls_back_to_the_top_ranked_lineup():
     action = agent.choose_action(_preview_state(), CTX)
     bring, leads, _ = agent.log.last["code_ranking"][0]
     assert action["bring"] == bring and action["leads"] == leads
+
+
+# ---------------------------------------------------------------- A/B test
+
+def _ab_agent(provider, monkeypatch, tmp_path):
+    monkeypatch.setattr("agent.pokemon.agent.AB_DIR", tmp_path)
+    agent = PokemonAgent(provider, log=NullLog(), book=CardBook(), verbose=False, use_clock=False, reflect=False,
+                         ab=True)
+    agent.book.remember(list(CATALOG.values()))
+    return agent
+
+
+def _ctx(session_id, seat):
+    return DecisionContext(session_id=session_id, tournament_id=None, game_type="pokemon_vgc_doubles_draft",
+                           agent_id="me", seat_position=seat)
+
+
+def test_ab_arms_are_opposite_within_a_game_and_vary_across_games():
+    from agent.pokemon.agent import ab_arm
+
+    sessions = [f"session-{n}" for n in range(40)]
+    for s in sessions:
+        assert {ab_arm(s, 0), ab_arm(s, 1)} == {"ranked", "plain"}
+    seat0 = [ab_arm(s, 0) for s in sessions]
+    assert 10 < seat0.count("ranked") < 30  # each seat gets both arms
+    assert ab_arm("x", None, "a") in ("ranked", "plain")
+
+
+def test_ab_plain_arm_hides_the_ranking_and_ranked_arm_shows_it(monkeypatch, tmp_path):
+    from agent.pokemon.agent import ab_arm
+
+    session = "s-ab"
+    for seat in (0, 1):
+        provider = FailingProvider()
+        agent = _ab_agent(provider, monkeypatch, tmp_path)
+        action = agent.choose_action(_draft_state(), _ctx(session, seat))
+        arm = ab_arm(session, seat)
+        assert agent.arm == arm and agent.log.last["ab_arm"] == arm
+        if arm == "ranked":
+            assert "CODE-RANKED PICKS" in provider.views[0] and agent.log.last["code_ranking"]
+        else:
+            assert "CODE-RANKED" not in provider.views[0] and agent.log.last["code_ranking"] == []
+            assert action.action_id == _draft_state().legal_actions[0].action_id  # the old fallback
+
+
+def test_ab_result_row_is_written_at_game_end(monkeypatch, tmp_path):
+    agent = _ab_agent(FailingProvider(), monkeypatch, tmp_path)
+    ctx = _ctx("s-end", 0)
+    agent.choose_action(_draft_state(), ctx)
+    agent.on_game_end(SimpleNamespace(final_result={"your_return": 1.0}, termination_reason="completed"), ctx)
+    row = __import__("json").loads((tmp_path / "teambuild.jsonl").read_text())
+    assert row["session_id"] == "s-end" and row["seat"] == 0 and row["ab_arm"] == agent.arm
+    assert row["result"] == "win" and row["termination"] == "completed"
+    assert row["drafted_first"] is True and row["fallbacks"] == 1
+
+
+def test_recorder_forwards_game_end(monkeypatch, tmp_path):
+    from tools import recorder
+
+    seen = []
+    inner = SimpleNamespace(on_game_end=lambda state, ctx: seen.append(ctx.session_id))
+    monkeypatch.setattr(recorder, "LOG_DIR", tmp_path)
+    rec = recorder.RecorderAgent.__new__(recorder.RecorderAgent)
+    rec.inner_name, rec._inner, rec._file = "x.inner", inner, None
+    rec.on_game_end(SimpleNamespace(final_result={"your_return": 0.0}), _ctx("s-rec", 1))
+    assert seen == ["s-rec"]
+    assert '"game_end"' in next(tmp_path.iterdir()).read_text()
+
+
+def test_ab_report_pairs_seats_and_tests_against_half():
+    from tools.ab_report import binomial_p, games, summary, wilson
+
+    rows = [
+        {"session_id": "g1", "seat": 0, "ab_arm": "ranked", "result": "win", "drafted_first": True},
+        {"session_id": "g1", "seat": 1, "ab_arm": "plain", "result": "loss", "drafted_first": False},
+        {"session_id": "g2", "seat": 0, "ab_arm": "plain", "result": "win", "drafted_first": True},
+        {"session_id": "g2", "seat": 1, "ab_arm": "ranked", "result": "loss", "drafted_first": False},
+        {"session_id": "g3", "seat": 1, "ab_arm": "plain", "result": "loss", "drafted_first": True},  # one seat only
+        {"session_id": "g4", "seat": 0, "ab_arm": "ranked", "result": "win"},
+        {"session_id": "g4", "seat": 1, "ab_arm": "plain", "result": "win"},  # inconsistent
+        {"session_id": "g5", "seat": 0, "ab_arm": "ranked", "result": "timed out", "termination": "timeout"},
+    ]
+    entries, problems = games(rows)
+    assert [(e["session_id"], e["result"], e["ranked_drafted_first"]) for e in entries] == [
+        ("g1", "win", True), ("g2", "loss", False), ("g3", "win", False)]
+    assert len(problems) == 2 and "disagree" in problems[0] and "no result" in problems[1]
+    assert "ranked won 2 of 3" in summary("All", entries)
+    assert binomial_p(5, 10) == 1.0 and binomial_p(10, 10) == pytest.approx(2 / 1024)
+    lo, hi = wilson(30, 50)
+    assert lo == pytest.approx(0.461, abs=1e-3) and hi == pytest.approx(0.724, abs=1e-3)

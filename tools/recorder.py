@@ -84,6 +84,12 @@ class RecorderAgent:
         if callable(forward):
             forward(result, context)
 
+    def on_game_end(self, final_state: GameState, context: DecisionContext) -> None:
+        self._write(context, {"kind": "game_end", "final_result": getattr(final_state, "final_result", None)})
+        forward = getattr(self._inner, "on_game_end", None)
+        if callable(forward):
+            forward(final_state, context)
+
     def choose_message(self, state: GameState, context: DecisionContext):
         forward = getattr(self._inner, "choose_message", None)
         if callable(forward):
