@@ -180,3 +180,13 @@ def test_moves_that_would_fail_are_flagged():
     assert failing_reason("sunnyday", facts) and failing_reason("raindance", facts) is None
     assert failing_reason("grassyterrain", facts) and failing_reason("psychicterrain", facts) is None
     assert failing_reason("tailwind", SimpleNamespace(my_side=Side(), field=Field())) is None
+
+
+def test_flinched_turn_counts_as_first_turn_for_fake_out():
+    from agent.pokemon.calc import read_log
+
+    log = ["|switch|p1a: Iron Hands|Iron Hands, L50|100/100", "|switch|p2a: Incineroar|Incineroar, L50|100/100",
+           "|turn|1", "|move|p2a: Incineroar|Fake Out|p1a: Iron Hands", "|cant|p1a: Iron Hands|flinch", "|turn|2"]
+    facts = read_log(log)
+    assert facts.moved[("p1", "Iron Hands")] is True  # live game: Fake Out on turn 2 failed
+    assert facts.moved[("p2", "Incineroar")] is True

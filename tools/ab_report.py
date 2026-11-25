@@ -2,6 +2,7 @@
 
     python -m tools.ab_report                  # logs/ab/teambuild.jsonl
     python -m tools.ab_report path/to/file.jsonl
+    python -m tools.ab_report --since 2026-11-25T12:30   # local time (or an ISO time with offset)
 
 Each seat of a self-play game appends one row (agent/pokemon/agent.py,
 POKEMON_AB_TEAMBUILD=1): its arm ("ranked" or "plain") and its result. The
@@ -17,10 +18,11 @@ first (to check that the draft order didn't drive the result).
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
-import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 DEFAULT = Path(__file__).resolve().parent.parent / "logs" / "ab" / "teambuild.jsonl"
@@ -98,12 +100,33 @@ def summary(label: str, entries: list[dict]) -> str:
             f"p = {binomial_p(wins, n):.3f} vs 50%)" + (f", {draws} draws left out" if draws else ""))
 
 
-def main(argv: list[str]) -> int:
-    path = Path(argv[0]) if argv else DEFAULT
+def since_filter(rows: list[dict], since: str | None) -> list[dict]:
+    """Rows of games started at or after ``since`` (naive times are local time)."""
+    if not since:
+        return rows
+    cutoff = datetime.fromisoformat(since)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.astimezone()
+    keep = []
+    for row in rows:
+        try:
+            if datetime.fromisoformat(row.get("started_at") or "") >= cutoff:
+                keep.append(row)
+        except ValueError:
+            pass
+    return keep
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("path", nargs="?", default=str(DEFAULT))
+    parser.add_argument("--since", help="only games started at/after this time, e.g. 2026-11-25T12:30 (local)")
+    args = parser.parse_args(argv)
+    path = Path(args.path)
     if not path.exists():
         print(f"No A/B results yet ({path}). Run the agent with POKEMON_AB_TEAMBUILD=1 and play self-play matches.")
         return 1
-    entries, problems = games(load(path))
+    entries, problems = games(since_filter(load(path), args.since))
     print(f"{len(entries)} games with a result ({path})")
     print(summary("All games", entries))
     for first, label in ((True, "Ranked seat drafted first"), (False, "Plain seat drafted first")):
@@ -121,4 +144,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    raise SystemExit(main())

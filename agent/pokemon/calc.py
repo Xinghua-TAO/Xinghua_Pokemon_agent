@@ -208,6 +208,9 @@ def field_from_obs(obs: dict, active_abilities: list[str]) -> tuple[Field, Side,
 _BOOST_START = re.compile(r"^\|-start\|(p\d)[ab]: ([^|]+)\|(?:quarkdrive|protosynthesis)(atk|def|spa|spd|spe)")
 _SWITCH = re.compile(r"^\|(?:switch|drag)\|(p\d)[ab]: ([^|]+)\|")
 _MOVE = re.compile(r"^\|move\|(p\d)[ab]: ([^|]+)\|([^|]*)")
+# "|cant|p1a: Iron Hands|flinch": it chose a move but couldn't act (flinch,
+# paralysis, sleep...). That still uses up its first turn: Fake Out fails next turn.
+_CANT = re.compile(r"^\|cant\|(p\d)[ab]: ([^|]+)\|")
 
 # Moves that share Protect's "fails more often when used in a row" counter.
 PROTECT_MOVES = frozenset({"protect", "detect", "spikyshield", "kingsshield", "banefulbunker", "silktrap",
@@ -235,6 +238,10 @@ def read_log(protocol_log: list[str]) -> LogFacts:
             streak[key] = 0
         elif m := _BOOST_START.match(line):
             boosts[(m.group(1), m.group(2))] = m.group(3)
+        elif m := _CANT.match(line):
+            key = (m.group(1), m.group(2))
+            moved[key] = True
+            streak[key] = 0  # no Protect this turn, so the Protect chain is broken
         elif m := _MOVE.match(line):
             key = (m.group(1), m.group(2))
             moved[key] = True
