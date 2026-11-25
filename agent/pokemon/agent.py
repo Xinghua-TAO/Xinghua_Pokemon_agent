@@ -26,13 +26,20 @@ from pathlib import Path
 from altruagent import DecisionContext, GameState, WithReasoning
 from examples.llm.providers import ProviderError
 
-from .analysis import annotate_options, battle_facts, double_target_lines, fresh_from_log, speed_line, threat_lines
+from collections import Counter
+
+from .analysis import (
+    annotate_options, assume_booster, battle_facts, card_mon, double_target_lines, fresh_from_log, speed_line,
+    threat_lines,
+)
+from .calc import build_mon
 from .cards import CardBook, species_key
+from .teambuild import draft_lines, lineup_lines, rank_draft, rank_lineups
 from .llm import providers_from_env
 from .memory import OpponentMemory, history_lines, now_iso, parse_battle, this_game_lines
 from .options import Option, build_slot_options, combo_error, fallback_choice
 from . import promptbook
-from .views import battle_view, draft_view, my_side_id, team_preview_view
+from .views import SNAKE_ORDER, battle_view, draft_view, my_side_id, team_preview_view
 
 # Time budgets (seconds), always inside the server's own limits:
 # draft picks have 15 s; the platform plays a random move after 50 s a turn
@@ -307,7 +314,13 @@ class PokemonAgent:
         picks = [p for p in obs.get("picks") or [] if isinstance(p, dict)]
         self.record["our_picks"] = [p.get("species") for p in picks if p.get("seat_id") == context.agent_id]
         self.record["their_picks"] = [p.get("species") for p in picks if p.get("seat_id") != context.agent_id]
-        view = draft_view(obs, context.agent_id, legal_ids, self.book, self._history())
+        ranked, rank_lines, rank_error = [], [], None
+        try:
+            ranked, opponent_next = self._rank_draft(obs, context, legal_ids)
+            rank_lines = draft_lines(ranked, opponent_next)
+        except Exception as exc:  # noqa: BLE001 - the ranking is advice; never let it cost the pick
+            rank_error = f"{type(exc).__name__}: {exc}"
+        view = draft_view(obs, context.agent_id, legal_ids, self.book, rank_lines + self._history())
         schema = _object_schema({"analysis": _TEXT, "pick": {"type": "string", "enum": legal_ids}, "public_reason": _TEXT})
         answer, attempts = self._ask(
             "draft_pick", self.prompts["draft"], view, schema,
@@ -315,10 +328,37 @@ class PokemonAgent:
             self._budget(state), provider=self.draft_provider, request_timeout=DRAFT_BUDGET,
         )
         fallback = answer is None
-        pick = legal_ids[0] if fallback else answer["pick"]
+        if fallback:
+            pick = ranked[0]["card_id"] if ranked and ranked[0]["card_id"] in legal else legal_ids[0]
+        else:
+            pick = answer["pick"]
         reason = None if fallback else answer.get("public_reason")
-        self._record(context, "draft", started, view, attempts, {"pick": pick}, fallback)
+        self._record(context, "draft", started, view, attempts, {"pick": pick}, fallback,
+                     {"code_ranking": [(r["card_id"], r["score"]) for r in ranked], "ranking_error": rank_error})
         return WithReasoning(legal[pick], reason) if reason else legal[pick]
+
+    def _rank_draft(self, obs: dict, context: DecisionContext, legal_ids: list[str]) -> tuple[list[dict], bool]:
+        available = {c["card_id"]: c for c in obs.get("available_cards") or [] if isinstance(c, dict) and c.get("card_id")}
+        rosters = obs.get("rosters") or {}
+
+        def mons(entries) -> list:
+            cards = [self.book.by_id(e.get("card_id", "")) or self.book.by_species(e.get("species"))
+                     for e in entries or [] if isinstance(e, dict)]
+            return [m for m in (card_mon(c) for c in cards if c) if m]
+
+        mine = mons(rosters.get(context.agent_id))
+        theirs = mons(next((v for k, v in rosters.items() if k != context.agent_id), []))
+        pool = [m for m in (card_mon(c) for c in available.values()) if m]
+        legal = []
+        for card_id in legal_ids:
+            card = available.get(card_id) or self.book.by_id(card_id)
+            mon = card_mon(card) if card else None
+            if mon:
+                legal.append((card_id, mon))
+        my_letter = "A" if obs.get("first_drafter") == context.agent_id else "B"
+        pick_number = int(obs.get("pick_number") or 1)
+        opponent_next = pick_number < len(SNAKE_ORDER) and SNAKE_ORDER[pick_number] != my_letter
+        return rank_draft(legal, mine, theirs, pool, opponent_next=opponent_next), opponent_next
 
     # ------------------------------------------------------------ team preview
 
@@ -329,7 +369,14 @@ class PokemonAgent:
         template = state.legal_actions[0].input.get("action") or {}
         roster = [s for s in template.get("roster") or [] if isinstance(s, str)]
         self.record["their_roster"] = [e.get("species") for e in self.opponent_preview]
-        view = team_preview_view(obs, self.book, self._history())
+        ranked, rank_lines, rank_error = [], [], None
+        try:
+            ranked = self._rank_lineups(obs)
+            ranked = [r for r in ranked if set(r["bring"]) <= set(roster)]
+            rank_lines = lineup_lines(ranked)
+        except Exception as exc:  # noqa: BLE001 - advice only
+            rank_error = f"{type(exc).__name__}: {exc}"
+        view = team_preview_view(obs, self.book, rank_lines + self._history())
         species = {"type": "array", "items": {"type": "string", "enum": roster}}
         schema = _object_schema({"analysis": _TEXT, "bring": species, "leads": species, "public_reason": _TEXT})
 
@@ -345,13 +392,35 @@ class PokemonAgent:
         answer, attempts = self._ask("select_lineup", self.prompts["preview"], view, schema, validate, self._budget(state),
                                      provider=first, retry_provider=retry, request_timeout=PREVIEW_REQUEST)
         fallback = answer is None
-        bring = roster[:4] if fallback else answer["bring"]
-        leads = bring[:2] if fallback else answer["leads"]
+        if fallback and ranked:
+            bring, leads = ranked[0]["bring"], ranked[0]["leads"]
+        elif fallback:
+            bring, leads = roster[:4], roster[:2]
+        else:
+            bring, leads = answer["bring"], answer["leads"]
         action = {"type": "select_lineup", "bring": bring, "leads": leads}
         self.record["our_bring"], self.record["our_leads"] = list(bring), list(leads)
-        self._record(context, "team_preview", started, view, attempts, action, fallback)
+        self._record(context, "team_preview", started, view, attempts, action, fallback,
+                     {"code_ranking": [(r["bring"], r["leads"], r["score"]) for r in ranked],
+                      "ranking_error": rank_error})
         reason = None if fallback else answer.get("public_reason")
         return WithReasoning(action, reason) if reason else action
+
+    def _rank_lineups(self, obs: dict) -> list[dict]:
+        def mons(entries) -> list:
+            out = []
+            for entry in entries or []:
+                if not isinstance(entry, dict):
+                    continue
+                mon = build_mon(entry, self.book.by_species(entry.get("species")), exact_hp=False)
+                if mon:
+                    mon.hp = mon.max_hp
+                    assume_booster(mon)
+                    out.append(mon)
+            return out
+
+        past_leads = Counter(species_key(s) for g in self.past for s in (g.get("battle") or {}).get("leads") or [])
+        return rank_lineups(mons(obs.get("your_roster")), mons(obs.get("opponent_roster")), past_leads=past_leads)
 
     # ------------------------------------------------------------ battle
 
